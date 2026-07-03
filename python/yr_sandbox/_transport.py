@@ -1,0 +1,596 @@
+"""HTTP client for the frontend sandbox v1 API.
+
+Small control-plane requests use the unified sandbox action model::
+
+    POST   /api/sandbox/v1/sandboxes
+    DELETE /api/sandbox/v1/sandboxes/{sandboxID}
+    POST   /api/sandbox/v1/sandboxes/{sandboxID}/invoke   {"action", "args"}
+
+Environment variables::
+
+    YR_SERVER_ADDRESS   host:port of the frontend gateway (required)
+    YR_TOKEN            JWT, sent in the ``X-Auth`` header (required)
+    YR_GATEWAY_ADDRESS  optional sandbox gateway for tunnel/user port URLs
+    YR_STREAM_ADDRESS   optional frontend host for file streams
+
+Response format:
+- Auth uses the raw JWT in the ``X-Auth`` header (no ``Bearer`` prefix).
+- Frontend responses use ``{"code", "message", "data"}``; ``data`` is a
+  base64-encoded JSON result and is decoded by this client.
+"""
+
+import base64
+import json
+import os
+import uuid
+from typing import Any, Dict, Iterable, Optional
+
+import httpx
+
+# Default per-call timeout buffer, mirroring types.YR_GET_TIMEOUT_BUFFER.
+from .types import YR_GET_DEFAULT_TIMEOUT, YR_GET_TIMEOUT_BUFFER
+
+
+class SandboxError(RuntimeError):
+    """Raised when the frontend returns a non-2xx response or an error body."""
+
+
+def _require_env(name: str) -> str:
+    value = os.environ.get(name, "").strip()
+    if not value:
+        raise RuntimeError(f"{name} is not set")
+    return value
+
+
+class SandboxClient:
+    """Thin HTTP client over the frontend sandbox v1 control plane.
+
+    A single client is shared by all sub-resources (files/commands/shells)
+    of one :class:`~yr_sandbox.Sandbox`. It is also used standalone for
+    create/delete before a sandbox id exists.
+    """
+
+    def __init__(
+        self,
+        server: Optional[str] = None,
+        token: Optional[str] = None,
+        *,
+        verify_tls: bool = False,
+    ):
+        self._server = server or _require_env("YR_SERVER_ADDRESS")
+        self._token = token or _require_env("YR_TOKEN")
+        # Production gateways are TLS. Set YR_TLS=0 for a plain-HTTP dev
+        # cluster (e.g. an AIO frontend started with frontend_ssl_enable=false).
+        self._tls = os.environ.get("YR_TLS", "1").strip().lower() not in (
+            "0",
+            "false",
+            "no",
+        )
+        scheme = "https" if self._tls else "http"
+        self._base = f"{scheme}://{self._server}/api/sandbox/v1"
+        # TLS verification is controlled by the caller. timeout=None lets each
+        # request pass an explicit timeout so long-running invokes are not cut
+        # off by a client-side default.
+        self._http = httpx.Client(
+            verify=verify_tls,
+            timeout=None,  # noqa: S113 — per-request timeouts passed explicitly
+            headers={"X-Auth": self._token},
+        )
+
+        # ── HTTP-direct-via-frontend /direct route ──────────────────────────
+        # RRT direct invoke is a control-plane fast path, so it follows the
+        # normal frontend gateway (YR_SERVER_ADDRESS / YR_TLS) rather than the
+        # data-plane gateway used by tunnel and user port URLs.  The frontend
+        # exposes /direct and forwards it to sandboxRouter after frontend JWT
+        # auth. The frontend owns the RRT control-port mapping, so clients do
+        # not expose the internal RRT port in the URL:
+        #   POST {server}/direct/{safeID}/invoke  {action, args}
+        self._rrt_port = int(
+            os.environ.get("YR_RRT_PORT", "50090").strip() or "50090"
+        )
+        self._direct_enabled = True
+        # Sticky: set once the direct route proves unreachable.
+        self._direct_disabled = False
+        self._direct_base = f"{scheme}://{self._server}/direct"
+        self._last_create: Dict[str, Any] = {}
+        self._resume_chunk_size = int(os.environ.get("YR_RESUME_CHUNK_SIZE", str(8 * 1024 * 1024)))
+        self._resume_max_retries = int(os.environ.get("YR_RESUME_MAX_RETRIES", "3"))
+
+    # ── lifecycle ──────────────────────────────────────────────────────
+
+    def create(self, body: Dict[str, Any]) -> str:
+        """POST /sandboxes — returns the new sandboxID."""
+        data = self.create_info(body)
+        sid = data.get("sandboxId") or data.get("instanceId")
+        if not sid:
+            raise SandboxError(f"create response missing sandboxId: {data}")
+        return sid
+
+    def create_info(self, body: Dict[str, Any]) -> Dict[str, Any]:
+        """POST /sandboxes — returns the full decoded create response."""
+        data = self._json(
+            self._http.post(f"{self._base}/sandboxes", json=body, timeout=120)
+        )
+        self._last_create = data
+        return data
+
+    @property
+    def last_create(self) -> Dict[str, Any]:
+        """Full decoded response from the most recent create call."""
+        return self._last_create
+
+    def delete(self, sandbox_id: str) -> None:
+        """DELETE /sandboxes/{id}."""
+        resp = self._http.delete(f"{self._base}/sandboxes/{sandbox_id}", timeout=60)
+        # Treat 404 as a successful idempotent teardown.
+        if resp.status_code not in (200, 202, 204, 404):
+            raise SandboxError(
+                f"delete {sandbox_id} failed: HTTP {resp.status_code} {resp.text}"
+            )
+
+    # ── unified action invoke ──────────────────────────────────────────
+
+    def invoke(
+        self,
+        sandbox_id: str,
+        action: str,
+        args: Optional[Dict[str, Any]] = None,
+        *,
+        timeout: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """POST /sandboxes/{id}/invoke with ``{action, args}``.
+
+        Returns the decoded JSON ``args``/result object. The HTTP timeout is
+        derived from the logical *timeout* with a small network buffer, so a slow
+        primitive does not trip the client first.
+        """
+        rpc_timeout: Optional[float]
+        if timeout is None:
+            rpc_timeout = YR_GET_DEFAULT_TIMEOUT
+        elif timeout < 0:
+            rpc_timeout = None  # unbounded
+        else:
+            rpc_timeout = max(timeout + YR_GET_TIMEOUT_BUFFER, YR_GET_DEFAULT_TIMEOUT)
+
+        # Prefer frontend /direct; fall back to frontend invoke.
+        if self._direct_enabled and not self._direct_disabled:
+            result, fell_back = self._invoke_direct(
+                sandbox_id, action, args or {}, rpc_timeout
+            )
+            if not fell_back:
+                return result
+
+        resp = self._http.post(
+            f"{self._base}/sandboxes/{sandbox_id}/invoke",
+            json={"action": action, "args": args or {}},
+            timeout=rpc_timeout,
+        )
+        return self._json(resp)
+
+    def _invoke_direct(
+        self,
+        sandbox_id: str,
+        action: str,
+        args: Dict[str, Any],
+        rpc_timeout: Optional[float],
+    ) -> "tuple[Dict[str, Any], bool]":
+        """Try the frontend /direct path. Returns ``(result, fell_back)``.
+
+        ``fell_back=True`` tells the caller to retry via frontend invoke. A
+        transport-level failure (direct route unreachable) also flips the
+        sticky ``_direct_disabled`` so we stop probing a dead direct route for
+        this client.
+        Unlike frontend invoke, the RRT HTTP server returns the raw result JSON
+        (no base64 ``BuildJobResponse`` envelope); action-level errors live
+        inside that object (HTTP 200), so only HTTP-level failures fall back.
+        """
+        url = f"{self._direct_base}/{self._safe_id(sandbox_id)}/invoke"
+        try:
+            request_id = self._new_request_id("invoke")
+            resp = self._http.post(
+                url,
+                json={"action": action, "args": args, "requestId": request_id},
+                timeout=rpc_timeout,
+                headers={"X-YR-Request-ID": request_id},
+            )
+        except httpx.RequestError:
+            # Direct route unreachable/timed out: disable direct and fall back.
+            self._direct_disabled = True
+            return {}, True
+        # 404 (route not ready) and 5xx (router/RRT down) → disable + fall back.
+        # 401/403/400 → fall back this call but keep probing (may be per-call).
+        if resp.status_code == 404 or resp.status_code >= 500:
+            self._direct_disabled = True
+            return {}, True
+        if resp.status_code >= 400:
+            return {}, True
+        try:
+            parsed = resp.json()
+        except ValueError:
+            return {}, True
+        if not isinstance(parsed, dict):
+            parsed = {"value": parsed}
+        return parsed, False
+
+    def upload_file_direct(
+        self,
+        sandbox_id: str,
+        local_path: str,
+        remote_path: str,
+        rpc_timeout: Optional[float] = None,
+        *,
+        upload_type: str = "file",
+    ) -> Dict[str, Any]:
+        """Upload a file/tar over the required frontend /direct binary data path."""
+        if upload_type == "file":
+            return self._upload_file_resumable(
+                sandbox_id, local_path, remote_path, rpc_timeout
+            )
+        content_len = os.path.getsize(local_path)
+        with open(local_path, "rb") as f:
+            return self._upload_direct(
+                sandbox_id,
+                f,
+                remote_path,
+                rpc_timeout,
+                upload_type=upload_type,
+                content_len=content_len,
+            )
+
+    def _upload_file_resumable(
+        self,
+        sandbox_id: str,
+        local_path: str,
+        remote_path: str,
+        rpc_timeout: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Upload a file via resumable /direct chunks and atomic commit."""
+        total = os.path.getsize(local_path)
+        upload_id = self._new_request_id("upload")
+        offset = self._upload_status(sandbox_id, remote_path, upload_id, rpc_timeout)
+        with open(local_path, "rb") as f:
+            while offset < total:
+                f.seek(offset)
+                chunk = f.read(min(self._resume_chunk_size, total - offset))
+                if not chunk:
+                    break
+                attempts = 0
+                while True:
+                    try:
+                        result = self._upload_direct(
+                            sandbox_id,
+                            chunk,
+                            remote_path,
+                            rpc_timeout,
+                            upload_type="file",
+                            content_len=len(chunk),
+                            extra_params={
+                                "uploadId": upload_id,
+                                "offset": str(offset),
+                                "totalSize": str(total),
+                            },
+                        )
+                        offset = int(result.get("offset", offset + len(chunk)))
+                        break
+                    except SandboxError:
+                        attempts += 1
+                        if attempts > self._resume_max_retries:
+                            raise
+                        offset = self._upload_status(
+                            sandbox_id, remote_path, upload_id, rpc_timeout
+                        )
+            return self._upload_commit(sandbox_id, remote_path, upload_id, total, rpc_timeout)
+
+    def _upload_status(
+        self,
+        sandbox_id: str,
+        remote_path: str,
+        upload_id: str,
+        rpc_timeout: Optional[float],
+    ) -> int:
+        url = f"{self._direct_base}/{self._safe_id(sandbox_id)}/upload/status"
+        try:
+            resp = self._http.get(
+                url,
+                params={"path": remote_path, "uploadId": upload_id},
+                timeout=rpc_timeout,
+            )
+        except httpx.RequestError as e:
+            raise SandboxError(f"direct upload status {sandbox_id} failed: {e}") from e
+        if resp.status_code >= 400:
+            raise SandboxError(
+                f"direct upload status {sandbox_id} failed: HTTP {resp.status_code} {resp.text}"
+            )
+        try:
+            parsed = resp.json()
+        except ValueError as e:
+            raise SandboxError("direct upload status returned non-JSON body") from e
+        return int(parsed.get("offset", 0))
+
+    def _upload_commit(
+        self,
+        sandbox_id: str,
+        remote_path: str,
+        upload_id: str,
+        total: int,
+        rpc_timeout: Optional[float],
+    ) -> Dict[str, Any]:
+        url = f"{self._direct_base}/{self._safe_id(sandbox_id)}/upload/commit"
+        request_id = self._new_request_id("upload-commit")
+        try:
+            resp = self._http.post(
+                url,
+                params={"path": remote_path, "uploadId": upload_id, "totalSize": str(total)},
+                timeout=rpc_timeout,
+                headers={"X-YR-Request-ID": request_id},
+            )
+        except httpx.RequestError as e:
+            raise SandboxError(f"direct upload commit {sandbox_id} failed: {e}") from e
+        if resp.status_code >= 400:
+            raise SandboxError(
+                f"direct upload commit {sandbox_id} failed: HTTP {resp.status_code} {resp.text}"
+            )
+        try:
+            parsed = resp.json()
+        except ValueError as e:
+            raise SandboxError("direct upload commit returned non-JSON body") from e
+        if not isinstance(parsed, dict):
+            parsed = {"value": parsed}
+        return parsed
+
+    def upload_bytes_direct(
+        self,
+        sandbox_id: str,
+        data: bytes,
+        remote_path: str,
+        rpc_timeout: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Upload bytes over the required frontend /direct binary data path."""
+        return self._upload_direct(
+            sandbox_id, data, remote_path, rpc_timeout, content_len=len(data)
+        )
+
+    def upload_stream_direct(
+        self,
+        sandbox_id: str,
+        chunks: Iterable[bytes],
+        remote_path: str,
+        rpc_timeout: Optional[float] = None,
+        *,
+        upload_type: str = "file",
+    ) -> Dict[str, Any]:
+        """Upload an iterator over bytes using HTTP chunked transfer encoding."""
+        return self._upload_direct(
+            sandbox_id,
+            chunks,
+            remote_path,
+            rpc_timeout,
+            upload_type=upload_type,
+        )
+
+    def _upload_direct(
+        self,
+        sandbox_id: str,
+        content,
+        remote_path: str,
+        rpc_timeout: Optional[float],
+        *,
+        upload_type: str = "file",
+        content_len: Optional[int] = None,
+        extra_params: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, Any]:
+        url = f"{self._direct_base}/{self._safe_id(sandbox_id)}/upload"
+        content_type = "application/x-tar" if upload_type == "tar" else "application/octet-stream"
+        headers = {"Content-Type": content_type}
+        if content_len is not None:
+            headers["Content-Length"] = str(content_len)
+        try:
+            params = {"path": remote_path, "type": upload_type}
+            if extra_params:
+                params.update(extra_params)
+            resp = self._http.post(
+                url,
+                params=params,
+                content=content,
+                timeout=rpc_timeout,
+                headers=headers,
+            )
+        except httpx.RequestError as e:
+            raise SandboxError(f"direct upload {sandbox_id} failed: {e}") from e
+        if resp.status_code >= 400:
+            raise SandboxError(
+                f"direct upload {sandbox_id} failed: HTTP {resp.status_code} {resp.text}"
+            )
+        try:
+            parsed = resp.json()
+        except ValueError as e:
+            raise SandboxError(f"direct upload {sandbox_id} returned non-JSON body") from e
+        if not isinstance(parsed, dict):
+            parsed = {"value": parsed}
+        return parsed
+
+    def download_file_direct(
+        self,
+        sandbox_id: str,
+        remote_path: str,
+        local_path: str,
+        rpc_timeout: Optional[float] = None,
+        *,
+        download_type: str = "file",
+    ) -> None:
+        """Download a file/tar over the required frontend /direct binary data path."""
+        if download_type == "file":
+            return self._download_file_resumable(
+                sandbox_id, remote_path, local_path, rpc_timeout
+            )
+        url = f"{self._direct_base}/{self._safe_id(sandbox_id)}/download"
+        try:
+            with self._http.stream(
+                "GET",
+                url,
+                params={"path": remote_path, "type": download_type},
+                timeout=rpc_timeout,
+            ) as resp:
+                if resp.status_code >= 400:
+                    body = resp.read().decode("utf-8", errors="replace")
+                    raise SandboxError(
+                        f"direct download {sandbox_id} failed: HTTP {resp.status_code} {body}"
+                    )
+                self._write_stream_to_file(resp, local_path, append=False)
+        except httpx.RequestError as e:
+            raise SandboxError(f"direct download {sandbox_id} failed: {e}") from e
+
+    def _download_file_resumable(
+        self,
+        sandbox_id: str,
+        remote_path: str,
+        local_path: str,
+        rpc_timeout: Optional[float] = None,
+    ) -> None:
+        url = f"{self._direct_base}/{self._safe_id(sandbox_id)}/download"
+        part_path = f"{local_path}.part"
+        parent = os.path.dirname(os.path.abspath(local_path))
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        attempts = 0
+        while True:
+            offset = os.path.getsize(part_path) if os.path.exists(part_path) else 0
+            headers = {"Range": f"bytes={offset}-"} if offset > 0 else None
+            try:
+                with self._http.stream(
+                    "GET",
+                    url,
+                    params={"path": remote_path, "type": "file"},
+                    timeout=rpc_timeout,
+                    headers=headers,
+                ) as resp:
+                    if resp.status_code >= 400:
+                        body = resp.read().decode("utf-8", errors="replace")
+                        raise SandboxError(
+                            f"direct download {sandbox_id} failed: HTTP {resp.status_code} {body}"
+                        )
+                    append = offset > 0 and resp.status_code == 206
+                    if offset > 0 and resp.status_code != 206:
+                        append = False
+                    self._write_stream_to_file(resp, part_path, append=append)
+                os.replace(part_path, local_path)
+                return
+            except httpx.RequestError as e:
+                attempts += 1
+                if attempts > self._resume_max_retries:
+                    raise SandboxError(f"direct download {sandbox_id} failed: {e}") from e
+
+    @staticmethod
+    def _write_stream_to_file(resp: httpx.Response, path: str, *, append: bool) -> None:
+        mode = "ab" if append else "wb"
+        with open(path, mode) as f:
+            for chunk in resp.iter_bytes():
+                if chunk:
+                    f.write(chunk)
+
+    def download_bytes_direct(
+        self,
+        sandbox_id: str,
+        remote_path: str,
+        rpc_timeout: Optional[float] = None,
+    ) -> bytes:
+        """Download bytes over the required frontend /direct binary data path."""
+        url = f"{self._direct_base}/{self._safe_id(sandbox_id)}/download"
+        try:
+            resp = self._http.get(
+                url,
+                params={"path": remote_path, "type": "file"},
+                timeout=rpc_timeout,
+            )
+        except httpx.RequestError as e:
+            raise SandboxError(f"direct download {sandbox_id} failed: {e}") from e
+        if resp.status_code >= 400:
+            raise SandboxError(
+                f"direct download {sandbox_id} failed: HTTP {resp.status_code} {resp.text}"
+            )
+        return resp.content
+
+    @property
+    def direct_enabled(self) -> bool:
+        """Whether RRT direct invoke first tries the frontend /direct route."""
+        return self._direct_enabled
+
+    @property
+    def rrt_port(self) -> int:
+        """Internal RRT HTTP container port requested during sandbox create."""
+        return self._rrt_port
+
+    @staticmethod
+    def _new_request_id(prefix: str) -> str:
+        return f"{prefix}-{uuid.uuid4()}"
+
+    @staticmethod
+    def _safe_id(sandbox_id: str) -> str:
+        """Sanitize an instance id the same way the router does (route.SanitizeID):
+        ``@`` -> ``-at-`` and ``/`` ``.`` ``_`` -> ``-``."""
+        s = sandbox_id.replace("@", "-at-")
+        return "".join("-" if c in "/._" else c for c in s)
+
+    # ── data-plane helpers ─────────────────────────────────────────────
+
+    def stream_url(self, sandbox_id: str) -> str:
+        """WebSocket URL for frontend file streams.
+
+        File copy streams are implemented by the frontend StreamV1Handler, so
+        they use the frontend host by default and allow a dedicated
+        ``YR_STREAM_ADDRESS`` override only for deployments that expose that same
+        frontend route on a separate address.
+        """
+        host = os.environ.get("YR_STREAM_ADDRESS", "").strip() or self._server
+        stream_tls_env = os.environ.get("YR_STREAM_TLS", "").strip().lower()
+        if stream_tls_env:
+            use_tls = stream_tls_env in ("1", "true", "yes")
+        else:
+            use_tls = self._tls
+        scheme = "wss" if use_tls else "ws"
+        return f"{scheme}://{host}/api/sandbox/v1/sandboxes/{sandbox_id}/stream"
+
+    @property
+    def token(self) -> str:
+        return self._token
+
+    def close(self) -> None:
+        self._http.close()
+
+    # ── internal ───────────────────────────────────────────────────────
+
+    @staticmethod
+    def _json(resp: httpx.Response) -> Dict[str, Any]:
+        """Unwrap the job.BuildJobResponse envelope.
+
+        Body: ``{"code": <http-status>, "message": "<err>", "data": "<b64>"}``.
+        ``code`` mirrors the HTTP status; HTTP-level failures (>=400) raise.
+        Action-level errors are carried *inside* ``data`` (e.g. an ``error``
+        key), so they are NOT raised here — the caller's result parsing
+        handles them while preserving the requested local file layout.
+        """
+        if resp.status_code >= 400:
+            raise SandboxError(f"HTTP {resp.status_code}: {resp.text}")
+        try:
+            envelope = resp.json()
+        except ValueError:
+            return {}
+
+        code = envelope.get("code", resp.status_code)
+        if isinstance(code, int) and code >= 400:
+            raise SandboxError(f"code {code}: {envelope.get('message', '')}")
+
+        raw = envelope.get("data")
+        if raw in (None, ""):
+            return {}
+        # Go marshals []byte as base64; decode then JSON-parse the inner result.
+        if isinstance(raw, str):
+            try:
+                decoded = base64.b64decode(raw)
+                parsed = json.loads(decoded)
+            except (ValueError, json.JSONDecodeError) as e:
+                raise SandboxError(f"failed to decode response data: {e}") from e
+        else:
+            # Some deployments may already return a JSON object for data.
+            parsed = raw
+        return parsed if isinstance(parsed, dict) else {"value": parsed}

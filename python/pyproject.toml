@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61", "setuptools-scm>=8"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "openyuanrong-sandbox"
+dynamic = ["version"]
+description = "Python SDK for openYuanrong remote sandboxes (RRT HTTP/WS backend, E2B-style API)"
+requires-python = ">=3.10"
+dependencies = [
+    "httpx>=0.24",
+    "websockets>=10.0",
+]
+
+[project.scripts]
+yr-sandbox = "yr_sandbox.cli:main"
+
+[tool.setuptools_scm]
+# pyproject.toml lives under python/ inside the multi-language SDK workspace.
+root = ".."
+# PyPI rejects local versions (+gHASH); the buildkite uploader enforces this too.
+local_scheme = "no-local-version"
+# Untagged checkouts (e.g. fresh submodule with no tags) still build.
+fallback_version = "0.10.0"
+
+[tool.setuptools.packages.find]
+include = ["yr_sandbox*"]
