@@ -1,6 +1,6 @@
 # openyuanrong-sandbox Python SDK
 
-Python SDK for openYuanrong remote sandboxes.  The transport talks to the
+Python SDK for openYuanrong sandboxes.  The transport talks to the
 frontend **sandbox v1** HTTP/WS interface backed by RRT. It uses the
 frontend sandbox API directly.
 
