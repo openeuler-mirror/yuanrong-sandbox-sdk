@@ -58,7 +58,7 @@ def _compose_gateway_url(*, gateway: str, scheme: str, path: str) -> str:
 
 
 class Sandbox:
-    """E2B-style sandbox API for openYuanrong (RRT HTTP/WS backend).
+    """High-level sandbox API for openYuanrong sandboxes.
 
     Usage::
 
