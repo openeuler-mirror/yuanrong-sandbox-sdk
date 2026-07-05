@@ -93,8 +93,13 @@ class SandboxClient:
         self._direct_disabled = False
         self._direct_base = f"{scheme}://{self._server}/direct"
         self._last_create: Dict[str, Any] = {}
-        self._resume_chunk_size = int(os.environ.get("YR_RESUME_CHUNK_SIZE", str(8 * 1024 * 1024)))
+        self._resume_chunk_size = int(
+            os.environ.get("YR_RESUME_CHUNK_SIZE", str(8 * 1024 * 1024))
+        )
         self._resume_max_retries = int(os.environ.get("YR_RESUME_MAX_RETRIES", "3"))
+        self._resume_min_size = int(
+            os.environ.get("YR_RESUME_MIN_SIZE", str(64 * 1024 * 1024))
+        )
 
     # ── lifecycle ──────────────────────────────────────────────────────
 
@@ -222,11 +227,11 @@ class SandboxClient:
         upload_type: str = "file",
     ) -> Dict[str, Any]:
         """Upload a file/tar over the required frontend /direct binary data path."""
-        if upload_type == "file":
+        content_len = os.path.getsize(local_path)
+        if upload_type == "file" and content_len >= self._resume_min_size:
             return self._upload_file_resumable(
                 sandbox_id, local_path, remote_path, rpc_timeout
             )
-        content_len = os.path.getsize(local_path)
         with open(local_path, "rb") as f:
             return self._upload_direct(
                 sandbox_id,
@@ -320,7 +325,11 @@ class SandboxClient:
         try:
             resp = self._http.post(
                 url,
-                params={"path": remote_path, "uploadId": upload_id, "totalSize": str(total)},
+                params={
+                    "path": remote_path,
+                    "uploadId": upload_id,
+                    "totalSize": str(total),
+                },
                 timeout=rpc_timeout,
                 headers={"X-YR-Request-ID": request_id},
             )

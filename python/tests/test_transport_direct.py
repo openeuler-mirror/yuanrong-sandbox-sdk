@@ -225,7 +225,53 @@ def test_files_write_text_uses_direct_upload():
     print("ok: text write uses direct upload ->", calls)
 
 
-def test_copy_from_local_file_uses_resumable_direct_upload():
+def test_copy_from_local_small_file_uses_single_direct_upload():
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = request.read()
+        calls.append(
+            (
+                request.method,
+                request.url.path,
+                request.url.params.get("path"),
+                request.url.params.get("uploadId"),
+                body,
+            )
+        )
+        return httpx.Response(
+            200,
+            json={
+                "error": None,
+                "name": "up.dat",
+                "path": request.url.params.get("path"),
+                "type": "file",
+                "size": len(body),
+            },
+        )
+
+    c = _make_client(handler)
+    with tempfile.NamedTemporaryFile("wb", delete=True) as f:
+        f.write(b"upload-file")
+        f.flush()
+        Filesystem(c, "sandbox-demo").copy_from_local(f.name, "/tmp/up.dat")
+
+    _check(
+        calls == [
+            (
+                "POST",
+                "/direct/sandbox-demo/upload",
+                "/tmp/up.dat",
+                None,
+                b"upload-file",
+            )
+        ],
+        f"small file should use one upload request: {calls}",
+    )
+    print("ok: copy_from_local small file uses single upload ->", calls)
+
+
+def test_copy_from_local_file_uses_resumable_direct_upload_above_threshold():
     calls = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -266,16 +312,28 @@ def test_copy_from_local_file_uses_resumable_direct_upload():
         )
 
     c = _make_client(handler)
+    c._resume_min_size = 1
     with tempfile.NamedTemporaryFile("wb", delete=True) as f:
         f.write(b"upload-file")
         f.flush()
         Filesystem(c, "sandbox-demo").copy_from_local(f.name, "/tmp/up.dat")
 
-    _check(calls[0][0:3] == ("GET", "/direct/sandbox-demo/upload/status", "/tmp/up.dat"), f"status call: {calls}")
-    _check(calls[1][0:5] == ("POST", "/direct/sandbox-demo/upload", "/tmp/up.dat", True, "0"), f"chunk call: {calls}")
+    _check(
+        calls[0][0:3] == ("GET", "/direct/sandbox-demo/upload/status", "/tmp/up.dat"),
+        f"status call: {calls}",
+    )
+    _check(
+        calls[1][0:5]
+        == ("POST", "/direct/sandbox-demo/upload", "/tmp/up.dat", True, "0"),
+        f"chunk call: {calls}",
+    )
     _check(calls[1][5] == b"upload-file", f"uploaded body: {calls}")
-    _check(calls[2][0:3] == ("POST", "/direct/sandbox-demo/upload/commit", "/tmp/up.dat"), f"commit call: {calls}")
-    print("ok: copy_from_local file uses resumable direct upload ->", calls)
+    _check(
+        calls[2][0:3]
+        == ("POST", "/direct/sandbox-demo/upload/commit", "/tmp/up.dat"),
+        f"commit call: {calls}",
+    )
+    print("ok: copy_from_local large file uses resumable upload ->", calls)
 
 def test_files_read_uses_direct_download():
     calls = []
@@ -743,7 +801,8 @@ if __name__ == "__main__":
     test_direct_binary_upload_success()
     test_files_write_bytes_uses_direct_upload()
     test_files_write_text_uses_direct_upload()
-    test_copy_from_local_file_uses_resumable_direct_upload()
+    test_copy_from_local_small_file_uses_single_direct_upload()
+    test_copy_from_local_file_uses_resumable_direct_upload_above_threshold()
     test_files_read_uses_direct_download()
     test_copy_to_local_file_uses_direct_download()
     test_direct_invoke_sends_request_id_header_and_body()
