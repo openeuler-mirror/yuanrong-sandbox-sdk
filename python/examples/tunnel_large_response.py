@@ -24,6 +24,7 @@ Usage:
 import hashlib
 import http.server
 import os
+import shlex
 import sys
 import tempfile
 import threading
@@ -118,8 +119,6 @@ def main():
         print(f"  {label}: local_size={len(data):,} expected={size:,} sha_ok={local_sha == file_hashes[label]} {'OK' if ok else 'FAIL'}")
         if not ok:
             print(f"    ERROR: local server returned wrong data for {label}")
-            proc.terminate()
-            proc.wait(timeout=5)
             return 1
     print("  Local server OK")
 
@@ -137,32 +136,10 @@ def main():
             # Verify basic tunnel connectivity
             print("\n[Test 0] Basic tunnel connectivity...")
             result = sb.commands.run(
-                f"python3 -c \"import urllib.request; r=urllib.request.urlopen('{tunnel_url}/health', timeout=10); print(r.status); print(r.read().decode())\"",
+                f"curl --noproxy '*' -fsS -m 10 {shlex.quote(tunnel_url + '/health')}",
                 timeout=30,
             )
             print(f"  health check: stdout={result.stdout.strip()}, exit={result.exit_code}")
-
-            # Write a fetch+verify script to the sandbox (avoids shell quoting issues)
-            fetch_script = (
-                "import hashlib, sys, urllib.request\n"
-                "url = sys.argv[1]\n"
-                "label = sys.argv[2]\n"
-                "expected_size = int(sys.argv[3])\n"
-                "expected_sha256 = sys.argv[4]\n"
-                "r = urllib.request.urlopen(url, timeout=60)\n"
-                "data = r.read()\n"
-                "actual_size = len(data)\n"
-                "sha256 = hashlib.sha256(data).hexdigest()\n"
-                "size_ok = actual_size == expected_size\n"
-                "sha_ok = sha256 == expected_sha256\n"
-                "print('RESULT:' + label + ' status=' + str(r.status) + "
-                "' expected=' + str(expected_size) + "
-                "' actual=' + str(actual_size) + "
-                "' size_ok=' + str(size_ok) + "
-                "' sha_ok=' + str(sha_ok) + "
-                "' sha256=' + sha256)\n"
-            )
-            sb.files.write("/tmp/fetch_verify.py", fetch_script)
 
             results = []
 
@@ -171,8 +148,18 @@ def main():
                 expected_sha = file_hashes[label]
                 print(f"\n[Test] Fetching {label} ({size:,} bytes) via tunnel...")
                 t0 = time.time()
+                tmp_path = f"/tmp/tunnel-large-{label}.bin"
                 result = sb.commands.run(
-                    f"python3 /tmp/fetch_verify.py {url} {label} {size} {expected_sha}",
+                    "set -e; "
+                    f"tmp={shlex.quote(tmp_path)}; "
+                    f"curl --noproxy '*' -fsS -m 60 {shlex.quote(url)} -o \"$tmp\"; "
+                    "actual=$(wc -c < \"$tmp\" | tr -d ' '); "
+                    "sha=$(openssl dgst -sha256 -r \"$tmp\" | awk '{print $1}'); "
+                    f"size_ok=false; [ \"$actual\" = {shlex.quote(str(size))} ] && size_ok=true; "
+                    f"sha_ok=false; [ \"$sha\" = {shlex.quote(expected_sha)} ] && sha_ok=true; "
+                    f"echo RESULT:{label} expected={size} actual=$actual size_ok=$size_ok sha_ok=$sha_ok sha256=$sha; "
+                    "rm -f \"$tmp\"; "
+                    "[ \"$size_ok\" = true ] && [ \"$sha_ok\" = true ]",
                     timeout=120,
                 )
                 elapsed = time.time() - t0
@@ -180,7 +167,7 @@ def main():
                 if result.stderr:
                     print(f"  stderr: {result.stderr.strip()}")
                 print(f"  exit_code={result.exit_code}, elapsed={elapsed:.2f}s")
-                passed = result.exit_code == 0 and "size_ok=True" in result.stdout and "sha_ok=True" in result.stdout
+                passed = result.exit_code == 0 and "size_ok=true" in result.stdout and "sha_ok=true" in result.stdout
                 results.append((label, passed, elapsed))
 
             # For 10MB, retry once if it failed (known intermittent issue with chunked encoding)
@@ -190,8 +177,18 @@ def main():
                 expected_sha = file_hashes[label]
                 print(f"\n[Retry] Fetching {label} ({size:,} bytes) via tunnel (attempt 2)...")
                 t0 = time.time()
+                tmp_path = f"/tmp/tunnel-large-{label}.bin"
                 result = sb.commands.run(
-                    f"python3 /tmp/fetch_verify.py {url} {label} {size} {expected_sha}",
+                    "set -e; "
+                    f"tmp={shlex.quote(tmp_path)}; "
+                    f"curl --noproxy '*' -fsS -m 60 {shlex.quote(url)} -o \"$tmp\"; "
+                    "actual=$(wc -c < \"$tmp\" | tr -d ' '); "
+                    "sha=$(openssl dgst -sha256 -r \"$tmp\" | awk '{print $1}'); "
+                    f"size_ok=false; [ \"$actual\" = {shlex.quote(str(size))} ] && size_ok=true; "
+                    f"sha_ok=false; [ \"$sha\" = {shlex.quote(expected_sha)} ] && sha_ok=true; "
+                    f"echo RESULT:{label} expected={size} actual=$actual size_ok=$size_ok sha_ok=$sha_ok sha256=$sha; "
+                    "rm -f \"$tmp\"; "
+                    "[ \"$size_ok\" = true ] && [ \"$sha_ok\" = true ]",
                     timeout=120,
                 )
                 elapsed = time.time() - t0
@@ -199,7 +196,7 @@ def main():
                 if result.stderr:
                     print(f"  stderr: {result.stderr.strip()}")
                 print(f"  exit_code={result.exit_code}, elapsed={elapsed:.2f}s")
-                passed = result.exit_code == 0 and "size_ok=True" in result.stdout and "sha_ok=True" in result.stdout
+                passed = result.exit_code == 0 and "size_ok=true" in result.stdout and "sha_ok=true" in result.stdout
                 results[-1] = (label, passed, elapsed)
 
             # Summary

@@ -14,7 +14,7 @@ Architecture:
     Port A (:8765) - WebSocket tunnel endpoint (Traefik registered)
     Port B (:8766) - HTTP proxy for sandbox code (127.0.0.1 only)
 
-    sandbox code: python3 -c "urllib.request.urlopen(...)" -> reaches local server
+    sandbox code: curl http://127.0.0.1:8766/... -> reaches local server
 
 Prerequisites:
   - YR_SERVER_ADDRESS and YR_TOKEN environment variables must be set.
@@ -136,32 +136,14 @@ def main():
                     f"rc={last_result.exit_code}, stdout={last_result.stdout!r}"
                 )
 
-            # Use Python urllib for the sandbox-side HTTP probe.  The larger
-            # tunnel smoke already gates on Python and has proven reliable in
-            # the K8S runner, while curl may inherit proxy/no_proxy behavior
-            # from the rootfs environment and hang before the request reaches
-            # the local 127.0.0.1:8766 tunnel proxy.
-            fetch_script = (
-                "import sys, urllib.error, urllib.request\n"
-                "url = sys.argv[1]\n"
-                "expected_status = int(sys.argv[2])\n"
-                "try:\n"
-                f"    r = urllib.request.urlopen(url, timeout={PROBE_TIMEOUT})\n"
-                "    status = r.status\n"
-                "    body = r.read().decode('utf-8', 'replace')\n"
-                "except urllib.error.HTTPError as e:\n"
-                "    status = e.code\n"
-                "    body = e.read().decode('utf-8', 'replace')\n"
-                "print('STATUS:' + str(status))\n"
-                "print(body)\n"
-                "raise SystemExit(0 if status == expected_status else 1)\n"
-            )
-            sb.files.write("/tmp/reverse_tunnel_fetch.py", fetch_script)
-
             def fetch_command(url: str, expected_status: int = 200) -> str:
+                quoted_url = shlex.quote(url)
                 return (
-                    "python3 /tmp/reverse_tunnel_fetch.py "
-                    f"{shlex.quote(url)} {expected_status}"
+                    "set -e; "
+                    f"out=$(curl --noproxy '*' -sS -m {PROBE_TIMEOUT} "
+                    f"-w '\\nSTATUS:%{{http_code}}' {quoted_url}); "
+                    "printf '%s\\n' \"$out\"; "
+                    f"printf '%s\\n' \"$out\" | grep -q 'STATUS:{expected_status}'"
                 )
 
             run_checked(
