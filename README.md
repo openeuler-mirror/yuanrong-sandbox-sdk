@@ -75,11 +75,18 @@ Base path: `/api/sandbox/v1/sandboxes` on `YR_SERVER_ADDRESS`.
 | `GET` | `/api/sandbox/v1/sandboxes/{sandboxID}/stream` | WebSocket upgrade | file/tar stream frames |
 
 `CreateV1Request` fields used by SDKs include `name`, `namespace`, `tenant`,
-`runtime`, `image`/`rootfs`, `ports`, `idleTimeoutSeconds`, `cpu`, `memory`,
+`runtime`, `image`/`rootfs`, `ports`, `idleTimeoutSeconds`,
+`createTimeoutSeconds`, `scheduleTimeoutSeconds`, `cpu`, `memory`,
 `cpu_limit`, `mem_limit`, `env`, `mounts`, `extra_config`, and `tunnel`.
 Frontend owns internal RRT port environment injection (`RRT_HTTP_PORT`,
 `RRT_TUNNEL_WS_PORT`, `RRT_TUNNEL_HTTP_PORT`); SDK callers should request
 features declaratively instead of setting those ports.
+
+Create and schedule timeouts use seconds. Callers normally set only one:
+`scheduleTimeoutSeconds = createTimeoutSeconds - 30`, or
+`createTimeoutSeconds = scheduleTimeoutSeconds + 30`. If both are sent, the
+schedule timeout must not exceed the create timeout and the difference must be
+at least 30 seconds.
 
 ### Direct data plane
 

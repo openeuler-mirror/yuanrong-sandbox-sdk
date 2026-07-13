@@ -20,6 +20,59 @@ from .types import Mount, PortForwarding, SandboxInfo
 logger = logging.getLogger(__name__)
 
 TUNNEL_HTTP_PROXY_URL = "http://127.0.0.1:8766"
+DEFAULT_CREATE_TIMEOUT = 60
+SCHEDULE_TIMEOUT_BUFFER = 30
+
+
+def _get_create_timeout(timeout: Optional[int]) -> int:
+    if timeout is not None:
+        value = timeout
+    else:
+        raw = os.environ.get(
+            "YR_SANDBOX_CREATE_TIMEOUT", str(DEFAULT_CREATE_TIMEOUT)
+        ).strip()
+        try:
+            value = int(raw)
+        except ValueError as exc:
+            raise ValueError(
+                "YR_SANDBOX_CREATE_TIMEOUT must be an integer number of seconds"
+            ) from exc
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError("create_timeout must be a positive integer")
+    return value
+
+
+def _resolve_create_timeouts(
+    create_timeout: Optional[int], schedule_timeout: Optional[int]
+) -> tuple[int, int]:
+    if schedule_timeout is not None and (
+        isinstance(schedule_timeout, bool)
+        or not isinstance(schedule_timeout, int)
+        or schedule_timeout <= 0
+    ):
+        raise ValueError("schedule_timeout must be a positive integer")
+
+    if create_timeout is None and schedule_timeout is not None:
+        return schedule_timeout + SCHEDULE_TIMEOUT_BUFFER, schedule_timeout
+
+    resolved_create = _get_create_timeout(create_timeout)
+    if schedule_timeout is None:
+        if resolved_create <= SCHEDULE_TIMEOUT_BUFFER:
+            raise ValueError(
+                f"create_timeout must be greater than {SCHEDULE_TIMEOUT_BUFFER}"
+            )
+        return resolved_create, resolved_create - SCHEDULE_TIMEOUT_BUFFER
+
+    if schedule_timeout > resolved_create:
+        raise ValueError(
+            "schedule_timeout must be less than or equal to create_timeout"
+        )
+    if resolved_create - schedule_timeout < SCHEDULE_TIMEOUT_BUFFER:
+        raise ValueError(
+            "create_timeout - schedule_timeout must be at least "
+            f"{SCHEDULE_TIMEOUT_BUFFER}"
+        )
+    return resolved_create, schedule_timeout
 
 
 def _get_tunnel_connect_timeout(timeout: Optional[float]) -> float:
@@ -77,9 +130,12 @@ class Sandbox:
         image: Optional[str] = None,
         cpu: int = 1000,
         memory: int = 4096,
+        runtime: Optional[str] = None,
         cpu_limit: int = 0,
         mem_limit: int = 0,
         idle_timeout: int = 300,
+        create_timeout: Optional[int] = None,
+        schedule_timeout: Optional[int] = None,
         env: Optional[Dict[str, str]] = None,
         name: Optional[str] = None,
         cwd: Optional[str] = None,
@@ -97,9 +153,18 @@ class Sandbox:
             image: Container image to use (e.g. ``"python:3.12-slim"``).
             cpu: CPU scheduling request in milli-cores (default 1000).
             memory: Memory scheduling request in MB (default 4096).
+            runtime: Optional sandbox runtime selector forwarded to the frontend
+                (for example ``"python3.9"``). If omitted, the frontend default
+                runtime is used.
             cpu_limit: CPU cgroup limit in milli-cores (0 = same as *cpu*).
             mem_limit: Memory cgroup limit in MB (0 = same as *memory*).
             idle_timeout: Seconds before idle sandbox is reclaimed (default 300).
+            create_timeout: Logical create budget in seconds. Defaults to
+                ``YR_SANDBOX_CREATE_TIMEOUT`` or 60 seconds.
+            schedule_timeout: Scheduling budget in seconds. Configure either
+                this or ``create_timeout``; the other budget is derived with a
+                30-second startup buffer. If both are set, their difference
+                must be at least 30 seconds.
             env: Environment variables to set in the sandbox.
             name: Logical name for the sandbox instance.
             cwd: Working directory inside the sandbox.
@@ -134,10 +199,17 @@ class Sandbox:
         self._tunnel_url = TUNNEL_HTTP_PROXY_URL
 
         # ── build create body ─────────────────────────────────────────────
+        resolved_create_timeout, resolved_schedule_timeout = _resolve_create_timeouts(
+            create_timeout, schedule_timeout
+        )
         body: Dict[str, Any] = {
             "namespace": "default",
             "idleTimeoutSeconds": idle_timeout,
+            "createTimeoutSeconds": resolved_create_timeout,
+            "scheduleTimeoutSeconds": resolved_schedule_timeout,
         }
+        if runtime:
+            body["runtime"] = runtime
         if image:
             body["image"] = image
             body["rootfs"] = {
