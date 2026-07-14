@@ -112,10 +112,64 @@ class SandboxClient:
         return sid
 
     def create_info(self, body: Dict[str, Any]) -> Dict[str, Any]:
-        """POST /sandboxes — returns the full decoded create response."""
-        data = self._json(
-            self._http.post(f"{self._base}/sandboxes", json=body, timeout=120)
-        )
+        """POST /sandboxes and return the confirmed-running final SSE result."""
+        logical_timeout = int(body.get("createTimeoutSeconds") or 60)
+        request_timeout = logical_timeout + YR_GET_TIMEOUT_BUFFER
+        final: Optional[Dict[str, Any]] = None
+        with self._http.stream(
+            "POST",
+            f"{self._base}/sandboxes",
+            json=body,
+            headers={"Accept": "text/event-stream"},
+            timeout=request_timeout,
+        ) as resp:
+            content_type = resp.headers.get("content-type", "").lower()
+            if "text/event-stream" not in content_type:
+                resp.read()
+                data = self._json(resp)
+                self._last_create = data
+                return data
+            if resp.status_code >= 400:
+                resp.read()
+                raise SandboxError(f"HTTP {resp.status_code}: {resp.text}")
+
+            event = ""
+            data_lines = []
+            for line in resp.iter_lines():
+                if line == "":
+                    if event == "final" and data_lines:
+                        try:
+                            parsed = json.loads("\n".join(data_lines))
+                        except json.JSONDecodeError as exc:
+                            raise SandboxError(
+                                f"invalid sandbox create final event: {exc}"
+                            ) from exc
+                        if not isinstance(parsed, dict):
+                            raise SandboxError(
+                                "sandbox create final event must contain a JSON object"
+                            )
+                        final = parsed
+                        break
+                    event = ""
+                    data_lines = []
+                    continue
+                if line.startswith(":"):
+                    continue
+                if line.startswith("event:"):
+                    event = line[6:].strip()
+                elif line.startswith("data:"):
+                    data_lines.append(line[5:].lstrip())
+
+        if final is None:
+            raise SandboxError("sandbox create stream ended before final event")
+        if final.get("status") != "running":
+            status = final.get("status") or "unknown"
+            code = final.get("errorCode")
+            message = final.get("message") or "sandbox did not reach running state"
+            raise SandboxError(
+                f"sandbox create {status} (errorCode={code}): {message}"
+            )
+        data = final
         self._last_create = data
         return data
 

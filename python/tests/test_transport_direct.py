@@ -24,7 +24,7 @@ os.environ.setdefault("YR_SERVER_ADDRESS", "frontend:8889")
 os.environ.setdefault("YR_TOKEN", "test-token")
 
 from yr_sandbox.filesystem import Filesystem  # noqa: E402
-from yr_sandbox._transport import SandboxClient  # noqa: E402
+from yr_sandbox._transport import SandboxClient, SandboxError  # noqa: E402
 
 
 def _check(cond: bool, msg: str) -> None:
@@ -48,6 +48,148 @@ def _make_client(handler):
         transport=httpx.MockTransport(handler), headers={"X-Auth": "test-token"}
     )
     return c
+
+
+def test_create_uses_sse_and_returns_running_final():
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["accept"] = request.headers.get("accept")
+        seen["body"] = json.loads(request.read())
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            text=(
+                'event: accepted\n'
+                'data: {"status":"creating"}\n\n'
+                ': heartbeat\n\n'
+                'event: final\n'
+                'data: {"sandboxId":"sandbox-sse","status":"running"}\n\n'
+            ),
+        )
+
+    c = _make_client(handler)
+    result = c.create_info({"name": "sandbox-sse", "createTimeoutSeconds": 7})
+    _check(result["sandboxId"] == "sandbox-sse", f"create result: {result}")
+    _check(result["status"] == "running", f"create status: {result}")
+    _check(seen["accept"] == "text/event-stream", f"Accept header: {seen}")
+    _check(seen["body"]["createTimeoutSeconds"] == 7, f"request body: {seen}")
+    print("ok: create uses SSE and returns running final")
+
+
+def test_create_rejects_timeout_final():
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            text=(
+                'event: accepted\n'
+                'data: {"status":"creating"}\n\n'
+                'event: final\n'
+                'data: {"sandboxId":"sandbox-timeout","status":"timeout",'
+                '"errorCode":3002,"message":"create timed out"}\n\n'
+            ),
+        )
+
+    c = _make_client(handler)
+    try:
+        c.create_info({"createTimeoutSeconds": 3})
+    except SandboxError as exc:
+        _check("create timed out" in str(exc), f"timeout error: {exc}")
+        _check("3002" in str(exc), f"timeout code missing: {exc}")
+    else:
+        raise AssertionError("timeout final must raise SandboxError")
+    print("ok: create rejects timeout final")
+
+
+def test_create_rejects_stream_without_final():
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            text='event: accepted\ndata: {"status":"creating"}\n\n: heartbeat\n\n',
+        )
+
+    c = _make_client(handler)
+    try:
+        c.create_info({"createTimeoutSeconds": 3})
+    except SandboxError as exc:
+        _check("final" in str(exc).lower(), f"missing-final error: {exc}")
+    else:
+        raise AssertionError("stream without final must raise SandboxError")
+    print("ok: create rejects stream without final")
+
+
+def test_sandbox_create_timeout_precedence_and_body():
+    import yr_sandbox.sandbox_api as sandbox_api
+
+    original_client = sandbox_api.SandboxClient
+    original_env = os.environ.get("YR_SANDBOX_CREATE_TIMEOUT")
+    seen = []
+
+    class FakeClient:
+        def create_info(self, body):
+            seen.append(dict(body))
+            return {"sandboxId": f"sandbox-{len(seen)}", "status": "running"}
+
+        def delete(self, _sandbox_id):
+            pass
+
+        def close(self):
+            pass
+
+    try:
+        sandbox_api.SandboxClient = FakeClient
+        os.environ["YR_SANDBOX_CREATE_TIMEOUT"] = "90"
+        explicit = sandbox_api.Sandbox(
+            create_timeout=70, runtime="python3.9", detached=True
+        )
+        schedule_only = sandbox_api.Sandbox(schedule_timeout=45, detached=True)
+        inherited = sandbox_api.Sandbox(detached=True)
+        explicit.kill()
+        schedule_only.kill()
+        inherited.kill()
+    finally:
+        sandbox_api.SandboxClient = original_client
+        if original_env is None:
+            os.environ.pop("YR_SANDBOX_CREATE_TIMEOUT", None)
+        else:
+            os.environ["YR_SANDBOX_CREATE_TIMEOUT"] = original_env
+
+    _check(seen[0]["createTimeoutSeconds"] == 70, f"explicit timeout body: {seen[0]}")
+    _check(seen[0]["scheduleTimeoutSeconds"] == 40, f"derived schedule timeout body: {seen[0]}")
+    _check(seen[0]["runtime"] == "python3.9", f"runtime body: {seen[0]}")
+    _check(seen[1]["createTimeoutSeconds"] == 75, f"derived create timeout body: {seen[1]}")
+    _check(seen[1]["scheduleTimeoutSeconds"] == 45, f"explicit schedule timeout body: {seen[1]}")
+    _check(seen[2]["createTimeoutSeconds"] == 90, f"env timeout body: {seen[2]}")
+    _check(seen[2]["scheduleTimeoutSeconds"] == 60, f"env-derived schedule timeout body: {seen[2]}")
+    _check("runtime" not in seen[2], f"default runtime must stay frontend-owned: {seen[2]}")
+    print("ok: Sandbox create timeout precedence and body")
+
+
+def test_sandbox_create_timeout_validation():
+    import yr_sandbox.sandbox_api as sandbox_api
+
+    invalid = (
+        ({"create_timeout": 30}, "create_timeout must be greater than 30"),
+        ({"schedule_timeout": 0}, "schedule_timeout must be a positive integer"),
+        (
+            {"create_timeout": 60, "schedule_timeout": 70},
+            "schedule_timeout must be less than or equal to create_timeout",
+        ),
+        (
+            {"create_timeout": 60, "schedule_timeout": 45},
+            "create_timeout - schedule_timeout must be at least 30",
+        ),
+    )
+    for kwargs, message in invalid:
+        try:
+            sandbox_api.Sandbox(detached=True, **kwargs)
+        except ValueError as exc:
+            _check(str(exc) == message, f"unexpected validation error: {exc}")
+        else:
+            raise AssertionError(f"invalid timeout combination accepted: {kwargs}")
+    print("ok: Sandbox create timeout validation")
 
 
 def test_direct_success_no_fallback():
@@ -794,6 +936,11 @@ def test_safe_id_matches_router_sanitize():
 
 
 if __name__ == "__main__":
+    test_create_uses_sse_and_returns_running_final()
+    test_create_rejects_timeout_final()
+    test_create_rejects_stream_without_final()
+    test_sandbox_create_timeout_precedence_and_body()
+    test_sandbox_create_timeout_validation()
     test_direct_success_no_fallback()
     test_direct_5xx_falls_back_and_sticks()
     test_direct_connect_error_falls_back()

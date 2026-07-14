@@ -12,6 +12,18 @@ with Sandbox(image="python:3.12-slim", cpu=2000, memory=4096) as sb:
     print(sb.commands.run("cat /tmp/hello.txt").stdout)
 ```
 
+Normally, configure only one sandbox create budget; the other value is derived
+automatically with a 30-second startup buffer:
+
+```python
+Sandbox(image="python:3.12-slim", create_timeout=120)   # schedule_timeout=90
+Sandbox(image="python:3.12-slim", schedule_timeout=90) # create_timeout=120
+```
+
+When both values are configured, `schedule_timeout <= create_timeout`, and their
+difference must be at least 30 seconds. The 30-second buffer covers rootfs/image
+preparation, runtime startup, and Running-state confirmation.
+
 ## Configuration
 
 | Var | Meaning |
@@ -24,6 +36,7 @@ with Sandbox(image="python:3.12-slim", cpu=2000, memory=4096) as sb:
 | `YR_STREAM_ADDRESS` | Optional frontend host for `/api/sandbox/v1/.../stream`; defaults to `YR_SERVER_ADDRESS`. |
 | `YR_STREAM_TLS` | Optional TLS override for stream routes. |
 | `YR_TUNNEL_CONNECT_TIMEOUT` | Reverse tunnel WebSocket connection wait in seconds. Default: `60`. |
+| `YR_SANDBOX_CREATE_TIMEOUT` | Sandbox end-to-end create budget in seconds. Default: `60`; must be greater than the 30-second scheduling buffer. |
 
 ## Build
 
