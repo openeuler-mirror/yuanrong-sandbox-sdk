@@ -1,7 +1,7 @@
 # Python SDK TODO
 
 This file tracks current feature gaps for the Python SDK against the frontend
-sandbox v1 HTTP/WS backend. Keep notes focused on current behavior, expected
+sandbox v1 HTTP backend. Keep notes focused on current behavior, expected
 usage, and backend requirements.
 
 ## Current supported surface
@@ -22,26 +22,18 @@ The Python SDK supports:
 
 ## Open items
 
-### 1. Interactive process/shell streaming over WebSocket
-
-The HTTP command and shell paths work today. Real-time stdout/stderr streaming
-for interactive processes still needs a backend stream lease and SDK wrapper.
-
-Unblock when RRT/frontend expose stable stream operations for process and shell
-stdin/stdout.
-
-### 2. Create-time cwd
+### 1. Create-time cwd
 
 `cwd` is accepted by the SDK create API, but backend create does not currently
 apply it to the sandbox process context. Use per-call `cwd` on
 `commands.run()` / `shells.create()`.
 
-### 3. Delete by name
+### 2. Delete by name
 
 `DELETE /sandboxes/{sandboxID}` deletes by sandbox id. Name-based delete needs a
 name-to-id lookup route before the SDK can support it reliably.
 
-### 4. Directory manifest copy
+### 3. Directory manifest copy
 
 Directory copy currently uses tar upload/download. This is fast for successful
 single-shot transfers, but it cannot resume from a mid-stream failure.

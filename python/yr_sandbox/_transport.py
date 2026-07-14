@@ -11,7 +11,6 @@ Environment variables::
     YR_SERVER_ADDRESS   host:port of the frontend gateway (required)
     YR_TOKEN            JWT, sent in the ``X-Auth`` header (required)
     YR_GATEWAY_ADDRESS  optional sandbox gateway for tunnel/user port URLs
-    YR_STREAM_ADDRESS   optional frontend host for file streams
 
 Response format:
 - Auth uses the raw JWT in the ``X-Auth`` header (no ``Bearer`` prefix).
@@ -593,25 +592,6 @@ class SandboxClient:
         ``@`` -> ``-at-`` and ``/`` ``.`` ``_`` -> ``-``."""
         s = sandbox_id.replace("@", "-at-")
         return "".join("-" if c in "/._" else c for c in s)
-
-    # ── data-plane helpers ─────────────────────────────────────────────
-
-    def stream_url(self, sandbox_id: str) -> str:
-        """WebSocket URL for frontend file streams.
-
-        File copy streams are implemented by the frontend StreamV1Handler, so
-        they use the frontend host by default and allow a dedicated
-        ``YR_STREAM_ADDRESS`` override only for deployments that expose that same
-        frontend route on a separate address.
-        """
-        host = os.environ.get("YR_STREAM_ADDRESS", "").strip() or self._server
-        stream_tls_env = os.environ.get("YR_STREAM_TLS", "").strip().lower()
-        if stream_tls_env:
-            use_tls = stream_tls_env in ("1", "true", "yes")
-        else:
-            use_tls = self._tls
-        scheme = "wss" if use_tls else "ws"
-        return f"{scheme}://{host}/api/sandbox/v1/sandboxes/{sandbox_id}/stream"
 
     @property
     def token(self) -> str:

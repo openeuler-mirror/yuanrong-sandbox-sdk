@@ -659,37 +659,6 @@ def test_tunnel_client_keeps_http_req_dedup_cache():
     print("ok: TunnelClient has http_req id dedup/replay cache")
 
 
-def test_stream_url_uses_frontend_not_router_by_default():
-    os.environ["YR_SERVER_ADDRESS"] = "frontend:8889"
-    os.environ["YR_GATEWAY_ADDRESS"] = "router:8080"
-    os.environ.pop("YR_STREAM_ADDRESS", None)
-    os.environ["YR_TLS"] = "0"
-    c = SandboxClient()
-    got = c.stream_url("sandbox-demo")
-    _check(
-        got == "ws://frontend:8889/api/sandbox/v1/sandboxes/sandbox-demo/stream",
-        f"stream URL should target frontend route, got {got}",
-    )
-    print("ok: stream URL ignores sandboxRouter by default ->", got)
-
-
-def test_stream_url_allows_dedicated_stream_override():
-    os.environ["YR_SERVER_ADDRESS"] = "frontend:8889"
-    os.environ["YR_GATEWAY_ADDRESS"] = "router:8080"
-    os.environ["YR_STREAM_ADDRESS"] = "stream-gw:8443"
-    os.environ["YR_STREAM_TLS"] = "1"
-    os.environ["YR_TLS"] = "0"
-    c = SandboxClient()
-    got = c.stream_url("sandbox-demo")
-    _check(
-        got == "wss://stream-gw:8443/api/sandbox/v1/sandboxes/sandbox-demo/stream",
-        f"stream URL override mismatch: {got}",
-    )
-    os.environ.pop("YR_STREAM_ADDRESS", None)
-    os.environ.pop("YR_STREAM_TLS", None)
-    print("ok: stream URL dedicated override ->", got)
-
-
 def test_reverse_tunnel_url_uses_gateway_tunnel_alias():
     import yr_sandbox.sandbox_api as sandbox_api
     import yr_sandbox.tunnel_client as tunnel_client
@@ -957,8 +926,6 @@ if __name__ == "__main__":
     test_tunnel_client_keeps_http_req_dedup_cache()
     test_copy_from_local_dir_streams_direct_tar_upload()
     test_copy_to_local_dir_uses_direct_tar_download()
-    test_stream_url_uses_frontend_not_router_by_default()
-    test_stream_url_allows_dedicated_stream_override()
     test_reverse_tunnel_url_uses_gateway_tunnel_alias()
     test_reverse_tunnel_uses_frontend_returned_tunnel_metadata()
     test_reverse_tunnel_example_local_server_serves_owned_ephemeral_port()

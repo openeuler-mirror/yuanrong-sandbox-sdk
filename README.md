@@ -39,10 +39,10 @@ All language SDKs should keep the same user-facing concepts:
 
 - `Sandbox` lifecycle: create, command execution, filesystem operations, kill.
 - Configuration from environment: `YR_SERVER_ADDRESS`, `YR_TOKEN`, optional
-  `YR_GATEWAY_ADDRESS`, TLS flags, and stream/gateway overrides.
+  `YR_GATEWAY_ADDRESS`, and TLS flags.
 - Frontend control plane: `/api/sandbox/v1/sandboxes`.
-- Direct data plane through frontend/gateway routes: `/direct/...`, `/tunnel/...`,
-  and stream/file-transfer routes as supported by the backend.
+- Direct file and action data plane through `/direct/...`, plus reverse tunnel
+  access through `/tunnel/...`.
 - Runnable examples only. Infra-specific or nonportable demos should live in docs
   or private test fixtures, not in public SDK example directories.
 
@@ -58,10 +58,9 @@ maintained in the main yuanrong workspace at `docs/features/sandbox-rest-api.md`
 | --- | --- |
 | `YR_SERVER_ADDRESS` | Frontend gateway `host:port`. Used for lifecycle, invoke, and `/direct` file IO. |
 | `YR_TOKEN` | JWT sent as raw `X-Auth: <token>` on authenticated frontend routes. Do not use `Authorization: Bearer`. |
-| `YR_TLS` | `1/true/yes` selects `https://` and `wss://` for frontend routes; `0/false/no` selects plaintext. |
+| `YR_TLS` | `1/true/yes` selects `https://` for frontend routes; `0/false/no` selects plaintext HTTP. |
 | `YR_GATEWAY_ADDRESS` | Optional sandbox gateway/router host for reverse tunnel and user port URLs; falls back to `YR_SERVER_ADDRESS`. |
 | `YR_GATEWAY_TLS` | `1/true/yes` selects `wss://` for `/tunnel`; default is plaintext `ws://`. |
-| `YR_STREAM_ADDRESS` / `YR_STREAM_TLS` | Optional override for the WebSocket stream endpoint. |
 
 ### Control plane
 
@@ -72,7 +71,6 @@ Base path: `/api/sandbox/v1/sandboxes` on `YR_SERVER_ADDRESS`.
 | `POST` | `/api/sandbox/v1/sandboxes` | `CreateV1Request` JSON | `{sandboxId, instanceId, status, tunnel?}` |
 | `DELETE` | `/api/sandbox/v1/sandboxes/{sandboxID}` | none | idempotent teardown; `404` is treated as already deleted by the SDK |
 | `POST` | `/api/sandbox/v1/sandboxes/{sandboxID}/invoke` | `{"action": string, "args": object}` | action result JSON |
-| `GET` | `/api/sandbox/v1/sandboxes/{sandboxID}/stream` | WebSocket upgrade | file/tar stream frames |
 
 `CreateV1Request` fields used by SDKs include `name`, `namespace`, `tenant`,
 `runtime`, `image`/`rootfs`, `ports`, `idleTimeoutSeconds`,
@@ -106,11 +104,10 @@ hides the internal RRT control port from user URLs.
 `/direct/{safeID}/{rrtPort}/...` is a frontend compatibility alias only; new
 SDKs should not expose it.
 
-### Stream, tunnel, and user ports
+### Tunnel and user ports
 
 | Surface | URL shape | Notes |
 | --- | --- | --- |
-| File stream WS | `/api/sandbox/v1/sandboxes/{sandboxID}/stream` | WebSocket subprotocol `sandbox.stream.v1`; binary frames are `YRS1` framed payloads. |
 | Reverse tunnel | `/tunnel/{safeID}` | SDK connects a local upstream to the gateway; default is plaintext `ws://` and does not send `YR_TOKEN`. |
 | User port forwarding | `http://<gateway>/<safeID>/<port>` | Returned by SDK `get_port_url(port)` for ports requested at create time. User service ports are public at router layer. |
 
