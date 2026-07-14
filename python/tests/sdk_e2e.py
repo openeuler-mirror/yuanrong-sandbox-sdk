@@ -59,15 +59,15 @@ try:
     chk("shell state persists (clean output)", r2.stdout == "FOO=bar", f"out={r2.stdout!r}")
     chk("shell cwd", r3.stdout == "/tmp", f"out={r3.stdout!r}")
 
-    # WS copy upload/download
+    # Direct HTTP copy upload/download
     with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as f:
         f.write("ws-small-payload-64b-xxxxxxxxxxxxxxxxxxxxx"); local_up = f.name
     sb.files.copy_from_local(local_up, "/tmp/up.dat")
     remote_content = sb.files.read("/tmp/up.dat")
-    chk("files.copy_from_local (WS)", remote_content == "ws-small-payload-64b-xxxxxxxxxxxxxxxxxxxxx", f"len={len(remote_content)}")
+    chk("files.copy_from_local (direct)", remote_content == "ws-small-payload-64b-xxxxxxxxxxxxxxxxxxxxx", f"len={len(remote_content)}")
     local_dn = local_up + ".dn"
     sb.files.copy_to_local("/tmp/up.dat", local_dn)
-    chk("files.copy_to_local (WS)", open(local_dn).read() == "ws-small-payload-64b-xxxxxxxxxxxxxxxxxxxxx")
+    chk("files.copy_to_local (direct)", open(local_dn).read() == "ws-small-payload-64b-xxxxxxxxxxxxxxxxxxxxx")
 
     # lifecycle
     chk("is_running", sb.is_running() is True)

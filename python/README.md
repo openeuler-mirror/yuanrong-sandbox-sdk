@@ -1,8 +1,8 @@
 # openyuanrong-sandbox Python SDK
 
-Python SDK for openYuanrong sandboxes.  The transport talks to the
-frontend **sandbox v1** HTTP/WS interface backed by RRT. It uses the
-frontend sandbox API directly.
+Python SDK for openYuanrong sandboxes. The transport uses the frontend
+**sandbox v1** HTTP interface backed by RRT, plus the gateway WebSocket route
+for reverse tunnels.
 
 ```python
 from yr_sandbox import Sandbox
@@ -30,11 +30,9 @@ preparation, runtime startup, and Running-state confirmation.
 | --- | --- |
 | `YR_SERVER_ADDRESS` | Frontend gateway `host:port` for lifecycle, invoke, direct file IO. Required. |
 | `YR_TOKEN` | JWT sent in `X-Auth` where required. |
-| `YR_TLS` | Set `1/true/yes` to use HTTPS/WSS for frontend control routes. Default: `0`. |
+| `YR_TLS` | Set `1/true/yes` to use HTTPS for frontend control routes. Default: `0`. |
 | `YR_GATEWAY_ADDRESS` | Optional sandbox gateway/router `host:port` for tunnel and user port URLs. Falls back to `YR_SERVER_ADDRESS`. |
 | `YR_GATEWAY_TLS` | Set `1/true/yes` to use WSS for gateway tunnel routes. Default: `0`. |
-| `YR_STREAM_ADDRESS` | Optional frontend host for `/api/sandbox/v1/.../stream`; defaults to `YR_SERVER_ADDRESS`. |
-| `YR_STREAM_TLS` | Optional TLS override for stream routes. |
 | `YR_TUNNEL_CONNECT_TIMEOUT` | Reverse tunnel WebSocket connection wait in seconds. Default: `60`. |
 | `YR_SANDBOX_CREATE_TIMEOUT` | Sandbox end-to-end create budget in seconds. Default: `60`; must be greater than the 30-second scheduling buffer. |
 
@@ -90,8 +88,6 @@ runnable SDK examples.
   `POST …/{id}/invoke` with the unified `{action, args}` model (`yr_sandbox/_transport.py`).
 - **Direct data plane** — frontend/gateway `/direct/{sandbox}/...` routes for
   command invoke and binary file upload/download.
-- **Stream data plane** — `/api/sandbox/v1/sandboxes/{id}/stream` WebSocket with
-  `YRS1` binary frames (`yr_sandbox/_stream.py`).
 - **Reverse tunnel** — gateway `/tunnel/{sandbox}` WebSocket back to a local
   upstream (`yr_sandbox/tunnel_client.py`). Local upstream requests intentionally ignore
   host proxy environment variables.
