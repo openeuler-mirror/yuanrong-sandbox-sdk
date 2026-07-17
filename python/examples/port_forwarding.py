@@ -16,6 +16,7 @@ Usage:
 """
 
 import time
+import urllib.error
 import urllib.request
 
 from yr_sandbox import Sandbox
@@ -30,9 +31,18 @@ EXPECTED_BODY = "ROUTER-PF-OK-808"
 SERVER_CMD = rf'''perl -MSocket -e '$|=1; socket(S,PF_INET,SOCK_STREAM,getprotobyname("tcp")); setsockopt(S,SOL_SOCKET,SO_REUSEADDR,1); bind(S,sockaddr_in({PORT},INADDR_ANY)) or die $!; listen(S,10); while(accept(C,S)){{ print C "HTTP/1.1 200 OK\r\nContent-Length: {len(EXPECTED_BODY)}\r\nConnection: close\r\n\r\n{EXPECTED_BODY}"; close C; }}' '''
 
 
-def fetch_text(url: str, timeout: int = 10) -> str:
-    with urllib.request.urlopen(url, timeout=timeout) as resp:
-        return resp.read().decode()
+def fetch_text(
+    url: str, timeout: int = 10, route_attempts: int = 30, retry_delay: float = 1
+) -> str:
+    for attempt in range(route_attempts):
+        try:
+            with urllib.request.urlopen(url, timeout=timeout) as resp:
+                return resp.read().decode()
+        except urllib.error.HTTPError as exc:
+            if exc.code != 404 or attempt + 1 == route_attempts:
+                raise
+            time.sleep(retry_delay)
+    raise RuntimeError("unreachable")
 
 
 def main():
