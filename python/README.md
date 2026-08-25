@@ -22,6 +22,10 @@ with Sandbox(image="python:3.12-slim", failover=True) as sb:
 `failover` defaults to `False`. Recovery requires a local checkpoint created
 by the sandbox checkpoint endpoint.
 
+`sb.reload()` explicitly restores the same logical sandbox from its latest
+local checkpoint and returns a boolean. It does not return a replacement
+`Sandbox` object or replace the command, filesystem, shell, or PTY facades.
+
 Create and manage non-expiring reusable Snapshots:
 
 ```python

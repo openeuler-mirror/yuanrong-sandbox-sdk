@@ -121,6 +121,41 @@ class LifecycleTests(unittest.TestCase):
             ["self"],
         )
 
+    def test_reload_returns_bool_without_replacing_facades(self):
+        class Client(_CloseTracker):
+            def reload(self, sandbox_id):
+                self.reload_arg = sandbox_id
+                return {"success": True}
+
+        sandbox = object.__new__(Sandbox)
+        sandbox._client = Client()
+        sandbox._sid = "default-sandbox-1"
+        sandbox._closed = False
+        sandbox._commands = object()
+        sandbox._files = object()
+        sandbox._shells = object()
+        before = (sandbox._client, sandbox._commands, sandbox._files, sandbox._shells)
+
+        self.assertIs(sandbox.reload(), True)
+        self.assertEqual(sandbox._client.reload_arg, "default-sandbox-1")
+        self.assertEqual(
+            (sandbox._client, sandbox._commands, sandbox._files, sandbox._shells),
+            before,
+        )
+
+    def test_reload_returns_false_when_closed_or_transport_fails(self):
+        class Client(_CloseTracker):
+            def reload(self, _sandbox_id):
+                raise yr_sandbox.SandboxError("reload failed")
+
+        sandbox = object.__new__(Sandbox)
+        sandbox._client = Client()
+        sandbox._sid = "default-sandbox-1"
+        sandbox._closed = True
+        self.assertIs(sandbox.reload(), False)
+        sandbox._closed = False
+        self.assertIs(sandbox.reload(), False)
+
     def test_pause_and_resume_return_typed_authoritative_results(self):
         pause_result_type = getattr(yr_sandbox, "PauseResult", None)
         resume_result_type = getattr(yr_sandbox, "ResumeResult", None)

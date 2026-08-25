@@ -461,6 +461,14 @@ class SandboxClient:
             body={},
         )
 
+    def reload(self, sandbox_id: str) -> Dict[str, Any]:
+        """Synchronously reload one sandbox using one internal request identity."""
+        return self._lifecycle_request(
+            sandbox_id,
+            operation="reload",
+            body={},
+        )
+
     def _lifecycle_request(
         self,
         sandbox_id: str,

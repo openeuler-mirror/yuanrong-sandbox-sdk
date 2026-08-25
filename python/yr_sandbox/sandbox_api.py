@@ -820,6 +820,15 @@ class Sandbox:
             raise SandboxError("resume response is not an authoritative RUNNING result")
         return resume
 
+    def reload(self) -> bool:
+        """Restore this sandbox from its latest local anonymous checkpoint."""
+        if self._closed:
+            return False
+        try:
+            return bool(self._client.reload(self._sid).get("success", False))
+        except SandboxError:
+            return False
+
     def _close(self, *, delete_remote: bool) -> None:
         if self._closed:
             return
