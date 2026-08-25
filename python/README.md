@@ -12,6 +12,16 @@ with Sandbox(image="python:3.12-slim", cpu=2000, memory=4096) as sb:
     print(sb.commands.run("cat /tmp/hello.txt").stdout)
 ```
 
+Enable same-node recovery from the latest local checkpoint explicitly:
+
+```python
+with Sandbox(image="python:3.12-slim", failover=True) as sb:
+    ...
+```
+
+`failover` defaults to `False`. Recovery requires a local checkpoint created
+by the sandbox checkpoint endpoint.
+
 Create and manage non-expiring reusable Snapshots:
 
 ```python

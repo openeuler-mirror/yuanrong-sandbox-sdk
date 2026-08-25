@@ -306,6 +306,7 @@ class Sandbox:
         node_id: Optional[str] = None,
         *,
         snapshot_id: Optional[str] = None,
+        failover: bool = False,
         xpu: Optional[str] = None,
         storage_mb: Optional[int] = None,
         storage_limit_mb: int = 0,
@@ -350,6 +351,8 @@ class Sandbox:
             storage_limit_mb: Writable root filesystem hard limit in MiB. ``0``
                 uses *storage_mb* (or the cluster default when *storage_mb* is
                 omitted).
+            failover: Restore this sandbox on the same node from its latest
+                local anonymous checkpoint after a sandbox failure.
             network: Optional creation-time network policy. Omitting it allows
                 unrestricted network access.
             connection: Explicit frontend and gateway connection settings.
@@ -368,6 +371,8 @@ class Sandbox:
             not isinstance(snapshot_id, str) or not snapshot_id.strip()
         ):
             raise ValueError("snapshot_id must be a non-empty string")
+        if not isinstance(failover, bool):
+            raise TypeError("failover must be a boolean")
         if env is not None and (
             not isinstance(env, Mapping)
             or not all(
@@ -478,6 +483,7 @@ class Sandbox:
         body: Dict[str, Any] = {
             "namespace": "default",
             "snapshotId": snapshot_id.strip() if snapshot_id is not None else None,
+            "failover": failover,
             "idleTimeoutSeconds": idle_timeout,
             "createTimeoutSeconds": resolved_create_timeout,
             "scheduleTimeoutSeconds": resolved_schedule_timeout,
