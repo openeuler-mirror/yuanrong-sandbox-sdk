@@ -48,8 +48,10 @@ source.kill()
 
 `SnapshotInfo` contains the stable `snapshot_id` and `names`. Snapshot objects
 have no TTL; callers own their lifecycle and delete them explicitly. Creating a
-clone accepts either a `SnapshotInfo` or an ID and follows the ordinary sandbox
-create path for its new name, resources, placement, and routes.
+clone accepts either a `SnapshotInfo` or an ID. Omitted `cpu`, `memory`,
+`cpu_limit`, and `mem_limit` values are inherited from the Snapshot; explicit
+values override the Snapshot template, including smaller values. Name,
+placement, and route options still describe the new clone.
 
 Request whole GPUs with the ``type:model:count`` form:
 

@@ -38,6 +38,9 @@ _AFFINITY_REQUIRED = 2
 _LABEL_OPERATION_IN = 0
 _NODE_ID_LABEL = "NODE_ID"
 _SUPPORTED_XPU_TYPES = frozenset({"gpu"})
+_SNAPSHOT_RESOURCE_FIELDS = frozenset(
+    {"cpu", "memory", "cpu_limit", "mem_limit"}
+)
 
 
 def _get_create_timeout(timeout: Optional[int]) -> int:
@@ -184,13 +187,24 @@ class Sandbox:
         snapshot_id: Union[str, SnapshotInfo],
         **kwargs: Any,
     ) -> "Sandbox":
-        """Create a new sandbox by restoring a READY reusable Snapshot."""
+        """Create a new sandbox by restoring a READY reusable Snapshot.
+
+        Resource fields omitted from ``kwargs`` are inherited from the
+        Snapshot. Explicit resource fields override the Snapshot template.
+        """
         value = (
             snapshot_id.snapshot_id
             if isinstance(snapshot_id, SnapshotInfo)
             else snapshot_id
         )
-        return cls(snapshot_id=value, **kwargs)
+        explicit_resource_fields = frozenset(kwargs).intersection(
+            _SNAPSHOT_RESOURCE_FIELDS
+        )
+        return cls(
+            snapshot_id=value,
+            _snapshot_resource_fields=explicit_resource_fields,
+            **kwargs,
+        )
 
     @staticmethod
     def _snapshot_info(payload: Mapping[str, Any]) -> SnapshotInfo:
@@ -314,6 +328,7 @@ class Sandbox:
         create_timeout: Optional[int] = None,
         connection: Optional[ConnectionConfig] = None,
         extra_config: Optional[Dict[str, Any]] = None,
+        _snapshot_resource_fields: Optional[frozenset[str]] = None,
     ):
         """Create a new sandbox.
 
@@ -508,10 +523,20 @@ class Sandbox:
             )
         if name:
             body["name"] = name
-        body["cpu"] = cpu
-        body["memory"] = memory
-        body["cpu_limit"] = cpu_limit
-        body["mem_limit"] = mem_limit
+        resource_values = {
+            "cpu": cpu,
+            "memory": memory,
+            "cpu_limit": cpu_limit,
+            "mem_limit": mem_limit,
+        }
+        serialized_resource_fields = (
+            _SNAPSHOT_RESOURCE_FIELDS
+            if snapshot_id is None or _snapshot_resource_fields is None
+            else _snapshot_resource_fields
+        )
+        for field in ("cpu", "memory", "cpu_limit", "mem_limit"):
+            if field in serialized_resource_fields:
+                body[field] = resource_values[field]
         if xpu is not None:
             body["xpu"] = xpu
         if storage_mb is not None:

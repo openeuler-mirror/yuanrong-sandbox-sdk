@@ -51,6 +51,60 @@ class ReusableSnapshotTests(unittest.TestCase):
             clone = Sandbox.create(snapshot, name="clone")
         self.assertEqual(clone.id, "default-clone")
         self.assertEqual(captured["snapshotId"], "snap-ready")
+        for resource_field in ("cpu", "memory", "cpu_limit", "mem_limit"):
+            self.assertNotIn(resource_field, captured)
+
+    def test_regular_create_keeps_default_resources(self):
+        captured = {}
+
+        class Client:
+            def __init__(self):
+                pass
+
+            def create_info(self, body):
+                captured.update(body)
+                return {"sandboxId": "default-regular"}
+
+            def close(self):
+                pass
+
+        with patch("yr_sandbox.sandbox_api.SandboxClient", Client):
+            sandbox = Sandbox()
+
+        self.assertEqual(sandbox.id, "default-regular")
+        self.assertEqual(
+            {key: captured[key] for key in ("cpu", "memory", "cpu_limit", "mem_limit")},
+            {"cpu": 1000, "memory": 4096, "cpu_limit": 0, "mem_limit": 0},
+        )
+
+    def test_create_from_snapshot_forwards_explicit_resource_overrides(self):
+        captured = {}
+
+        class Client:
+            def __init__(self):
+                pass
+
+            def create_info(self, body):
+                captured.update(body)
+                return {"sandboxId": "default-clone"}
+
+            def close(self):
+                pass
+
+        with patch("yr_sandbox.sandbox_api.SandboxClient", Client):
+            clone = Sandbox.create(
+                "snap-ready",
+                cpu=2000,
+                memory=8192,
+                cpu_limit=3000,
+                mem_limit=9216,
+            )
+
+        self.assertEqual(clone.id, "default-clone")
+        self.assertEqual(
+            {key: captured[key] for key in ("cpu", "memory", "cpu_limit", "mem_limit")},
+            {"cpu": 2000, "memory": 8192, "cpu_limit": 3000, "mem_limit": 9216},
+        )
 
     def test_snapshot_get_list_delete_delegate_to_transport(self):
         class Client:
