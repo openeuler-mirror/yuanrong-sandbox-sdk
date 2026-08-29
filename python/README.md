@@ -32,7 +32,9 @@ Create and manage non-expiring reusable Snapshots:
 from yr_sandbox import Sandbox
 
 source = Sandbox(name="source")
-snapshot = source.create_snapshot(name="python-ready")  # source remains running
+snapshot = source.create_snapshot(
+    name="python-ready", timeout_seconds=180
+)  # source remains running
 clone = Sandbox.create(snapshot, name="clone")
 
 snapshots, next_page_token = Sandbox.list_snapshots(
@@ -52,6 +54,11 @@ clone accepts either a `SnapshotInfo` or an ID. Omitted `cpu`, `memory`,
 `cpu_limit`, and `mem_limit` values are inherited from the Snapshot; explicit
 values override the Snapshot template, including smaller values. Name,
 placement, and route options still describe the new clone.
+
+The SDK does not stop or manually reconnect the source reverse tunnel while a
+Snapshot is being created. During the checkpoint control request, expected
+tunnel reconnect events are logged at debug level and do not affect the
+checkpoint result.
 
 Request whole GPUs with the ``type:model:count`` form:
 

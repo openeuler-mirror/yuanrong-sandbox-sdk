@@ -806,13 +806,23 @@ class Sandbox:
             raise ValueError("timeout_seconds must be a positive integer")
         if timeout_seconds <= 0 or timeout_seconds > 3600:
             raise ValueError("timeout_seconds must be between 1 and 3600")
-        return self._snapshot_info(
-            self._client.create_snapshot(
-                self._sid,
-                name=name.strip() if name is not None else None,
-                timeout_seconds=timeout_seconds,
+        tunnel = getattr(self, "_tunnel_client", None)
+        if tunnel is None:
+            return self._snapshot_info(
+                self._client.create_snapshot(
+                    self._sid,
+                    name=name.strip() if name is not None else None,
+                    timeout_seconds=timeout_seconds,
+                )
             )
-        )
+        with tunnel.checkpoint_inflight():
+            return self._snapshot_info(
+                self._client.create_snapshot(
+                    self._sid,
+                    name=name.strip() if name is not None else None,
+                    timeout_seconds=timeout_seconds,
+                )
+            )
 
     def pause(
         self,

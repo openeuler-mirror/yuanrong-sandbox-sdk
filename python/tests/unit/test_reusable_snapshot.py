@@ -23,14 +23,50 @@ class ReusableSnapshotTests(unittest.TestCase):
         sandbox._closed = False
 
         class Client:
-            def create_snapshot(self, sandbox_id, name=None):
-                self.request = (sandbox_id, name)
+            def create_snapshot(self, sandbox_id, name=None, timeout_seconds=300):
+                self.request = (sandbox_id, name, timeout_seconds)
                 return {"snapshotId": "snap-1", "names": ["base"]}
 
         sandbox._client = Client()
         result = sandbox.create_snapshot(name="base")
         self.assertEqual(result, yr_sandbox.SnapshotInfo("snap-1", ("base",)))
-        self.assertEqual(sandbox._client.request, ("default-source", "base"))
+        self.assertEqual(sandbox._client.request, ("default-source", "base", 300))
+
+    def test_create_snapshot_marks_tunnel_checkpoint_inflight_without_reconnecting(self):
+        class Scope:
+            def __init__(self):
+                self.active = False
+
+            def __enter__(self):
+                self.active = True
+                return self
+
+            def __exit__(self, *_args):
+                self.active = False
+
+        scope = Scope()
+
+        class Tunnel:
+            def checkpoint_inflight(self):
+                return scope
+
+        class Client:
+            def create_snapshot(self, sandbox_id, name=None, timeout_seconds=300):
+                self.request = (sandbox_id, name, timeout_seconds)
+                self.scope_was_active = scope.active
+                return {"snapshotId": "snap-1", "names": []}
+
+        sandbox = object.__new__(Sandbox)
+        sandbox._sid = "default-source"
+        sandbox._closed = False
+        sandbox._tunnel_client = Tunnel()
+        sandbox._client = Client()
+
+        result = sandbox.create_snapshot(timeout_seconds=240)
+
+        self.assertEqual(result.snapshot_id, "snap-1")
+        self.assertTrue(sandbox._client.scope_was_active)
+        self.assertFalse(scope.active)
 
     def test_create_from_snapshot_adds_only_snapshot_id(self):
         captured = {}
@@ -182,7 +218,9 @@ class ReusableSnapshotTests(unittest.TestCase):
         client._base = "https://frontend/api/sandbox/v1"
         client._http = HTTP()
 
-        created = client.create_snapshot("default-source", name="base")
+        created = client.create_snapshot(
+            "default-source", name="base", timeout_seconds=240
+        )
         client.get_snapshot("snap-1")
         client.list_snapshots(name="base", page_token="next", page_size=10)
         client.delete_snapshot("snap-1")
@@ -196,7 +234,11 @@ class ReusableSnapshotTests(unittest.TestCase):
             client._http.calls[0][1],
             "https://frontend/api/sandbox/v1/sandboxes/default-source/snapshots",
         )
-        self.assertEqual(client._http.calls[0][2]["json"], {"name": "base"})
+        self.assertEqual(
+            client._http.calls[0][2]["json"],
+            {"name": "base", "timeoutSeconds": 240},
+        )
+        self.assertEqual(client._http.calls[0][2]["timeout"], 270)
         self.assertEqual(
             client._http.calls[2][2]["params"],
             {"name": "base", "pageToken": "next", "pageSize": 10},

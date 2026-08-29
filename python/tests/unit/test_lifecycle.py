@@ -114,7 +114,7 @@ class LifecycleTests(unittest.TestCase):
         self.assertTrue(callable(resume), "Sandbox.resume must exist")
         self.assertEqual(
             list(inspect.signature(pause).parameters),
-            ["self", "ttl_seconds"],
+            ["self", "ttl_seconds", "timeout_seconds"],
         )
         self.assertEqual(
             list(inspect.signature(resume).parameters),
@@ -163,8 +163,8 @@ class LifecycleTests(unittest.TestCase):
         self.assertIsNotNone(resume_result_type, "ResumeResult must be public")
 
         class Client(_CloseTracker):
-            def pause(self, sandbox_id, ttl_seconds):
-                self.pause_args = (sandbox_id, ttl_seconds)
+            def pause(self, sandbox_id, ttl_seconds, timeout_seconds=300):
+                self.pause_args = (sandbox_id, ttl_seconds, timeout_seconds)
                 return {
                     "sandboxId": sandbox_id,
                     "snapshotId": "pause-123",
@@ -202,7 +202,10 @@ class LifecycleTests(unittest.TestCase):
                 expires_at=1_800_000_000,
             ),
         )
-        self.assertEqual(sandbox._client.pause_args, ("default-sandbox-1", 90_000))
+        self.assertEqual(
+            sandbox._client.pause_args,
+            ("default-sandbox-1", 90_000, 300),
+        )
         self.assertEqual(
             resume_result,
             resume_result_type(
