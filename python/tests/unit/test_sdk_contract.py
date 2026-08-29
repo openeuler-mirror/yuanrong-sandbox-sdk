@@ -463,6 +463,17 @@ class SDKContractTests(unittest.TestCase):
 
         self.assertEqual(_FakeClient.created[-1]["xpu"], "GPU::2")
 
+    def test_npu_request_is_forwarded_without_normalization(self):
+        with patch("yr_sandbox.sandbox_api.SandboxClient", _FakeClient):
+            Sandbox(
+                image="ubuntu:22.04",
+                runtime="runc",
+                xpu="npu:ascend910b4:1",
+                detached=True,
+            )
+
+        self.assertEqual(_FakeClient.created[-1]["xpu"], "npu:ascend910b4:1")
+
     def test_xpu_defaults_to_no_request(self):
         with patch("yr_sandbox.sandbox_api.SandboxClient", _FakeClient):
             Sandbox(image="ubuntu:22.04", detached=True)
@@ -478,7 +489,7 @@ class SDKContractTests(unittest.TestCase):
             ("gpu:l20:1:0", ValueError, "exactly three fields"),
             (":l20:1", ValueError, "exactly three fields"),
             ("gpu:l20:", ValueError, "exactly three fields"),
-            ("npu:910b:1", ValueError, "unsupported xpu type"),
+            ("tpu:v5e:1", ValueError, "unsupported xpu type"),
             ("gpu:l20:0", ValueError, "positive integer"),
             ("gpu:l20:-1", ValueError, "positive integer"),
             ("gpu:l20:1.5", ValueError, "positive integer"),

@@ -40,7 +40,7 @@ _AFFINITY_KIND_RESOURCE = 0
 _AFFINITY_REQUIRED = 2
 _LABEL_OPERATION_IN = 0
 _NODE_ID_LABEL = "NODE_ID"
-_SUPPORTED_XPU_TYPES = frozenset({"gpu"})
+_SUPPORTED_XPU_TYPES = frozenset({"gpu", "npu"})
 _SNAPSHOT_RESOURCE_FIELDS = frozenset(
     {"cpu", "memory", "cpu_limit", "mem_limit"}
 )
@@ -374,7 +374,7 @@ class Sandbox:
             detached: If True, ``kill()`` / context-manager exit skips teardown.
             xpu: Optional whole-device XPU request in ``type:model:count``
                 format. Leave ``model`` empty to accept any model. The first
-                version supports one ``gpu`` request.
+                version supports one ``gpu`` or ``npu`` request.
             storage_mb: Temporary writable root filesystem capacity in MiB.
                 ``None`` uses the cluster default.
             storage_limit_mb: Writable root filesystem hard limit in MiB. ``0``
