@@ -375,6 +375,7 @@ class SandboxClient:
         sandbox_id: str,
         *,
         name: Optional[str] = None,
+        timeout_seconds: int = YR_GET_DEFAULT_TIMEOUT,
     ) -> Dict[str, Any]:
         """Create a reusable Snapshot with one explicit request attempt.
 
@@ -384,13 +385,15 @@ class SandboxClient:
         lets an explicit reconciliation flow replay the same logical action.
         """
         request_id = self._new_request_id("snapshot")
-        body = {"name": name} if name is not None else {}
+        body: Dict[str, Any] = {"timeoutSeconds": timeout_seconds}
+        if name is not None:
+            body["name"] = name
         try:
             resp = self._http.post(
                 f"{self._base}/sandboxes/{sandbox_id}/snapshots",
                 json=body,
                 headers={"X-YR-Request-ID": request_id},
-                timeout=YR_GET_DEFAULT_TIMEOUT + YR_GET_TIMEOUT_BUFFER,
+                timeout=timeout_seconds + YR_GET_TIMEOUT_BUFFER,
             )
         except _CREATE_RETRYABLE_ERRORS as exc:
             raise SandboxError(
@@ -445,12 +448,14 @@ class SandboxClient:
         self,
         sandbox_id: str,
         ttl_seconds: int = 90_000,
+        timeout_seconds: int = YR_GET_DEFAULT_TIMEOUT,
     ) -> Dict[str, Any]:
         """Synchronously pause one sandbox using one internal request identity."""
         return self._lifecycle_request(
             sandbox_id,
             operation="pause",
-            body={"ttlSeconds": ttl_seconds},
+            body={"ttlSeconds": ttl_seconds, "timeoutSeconds": timeout_seconds},
+            timeout_seconds=timeout_seconds,
         )
 
     def resume(self, sandbox_id: str) -> Dict[str, Any]:
@@ -475,6 +480,7 @@ class SandboxClient:
         *,
         operation: str,
         body: Dict[str, Any],
+        timeout_seconds: int = YR_GET_DEFAULT_TIMEOUT,
     ) -> Dict[str, Any]:
         request_id = self._new_request_id(operation)
         last_error: Optional[BaseException] = None
@@ -484,7 +490,7 @@ class SandboxClient:
                     f"{self._base}/sandboxes/{sandbox_id}/{operation}",
                     json=body,
                     headers={"X-YR-Request-ID": request_id},
-                    timeout=YR_GET_DEFAULT_TIMEOUT + YR_GET_TIMEOUT_BUFFER,
+                    timeout=timeout_seconds + YR_GET_TIMEOUT_BUFFER,
                 )
             except _CREATE_RETRYABLE_ERRORS as exc:
                 last_error = exc

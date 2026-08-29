@@ -27,6 +27,7 @@ from .types import (
     SandboxInfo,
     SnapshotInfo,
     ResumeResult,
+    YR_GET_DEFAULT_TIMEOUT,
 )
 
 logger = logging.getLogger(__name__)
@@ -788,7 +789,12 @@ class Sandbox:
             image=info.get("image", self._image),
         )
 
-    def create_snapshot(self, *, name: Optional[str] = None) -> SnapshotInfo:
+    def create_snapshot(
+        self,
+        *,
+        name: Optional[str] = None,
+        timeout_seconds: int = YR_GET_DEFAULT_TIMEOUT,
+    ) -> SnapshotInfo:
         """Create a non-expiring reusable Snapshot and keep this sandbox running."""
         if self._closed:
             raise RuntimeError("sandbox is closed")
@@ -796,22 +802,38 @@ class Sandbox:
             not isinstance(name, str) or not name.strip()
         ):
             raise ValueError("name must be a non-empty string or None")
+        if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, int):
+            raise ValueError("timeout_seconds must be a positive integer")
+        if timeout_seconds <= 0 or timeout_seconds > 3600:
+            raise ValueError("timeout_seconds must be between 1 and 3600")
         return self._snapshot_info(
             self._client.create_snapshot(
                 self._sid,
                 name=name.strip() if name is not None else None,
+                timeout_seconds=timeout_seconds,
             )
         )
 
-    def pause(self, ttl_seconds: int = 90_000) -> PauseResult:
+    def pause(
+        self,
+        ttl_seconds: int = 90_000,
+        *,
+        timeout_seconds: int = YR_GET_DEFAULT_TIMEOUT,
+    ) -> PauseResult:
         """Synchronously pause this sandbox and return its durable snapshot."""
         if isinstance(ttl_seconds, bool) or not isinstance(ttl_seconds, int):
             raise ValueError("ttl_seconds must be a positive integer")
         if ttl_seconds <= 0:
             raise ValueError("ttl_seconds must be a positive integer")
+        if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, int):
+            raise ValueError("timeout_seconds must be a positive integer")
+        if timeout_seconds <= 0 or timeout_seconds > 3600:
+            raise ValueError("timeout_seconds must be between 1 and 3600")
         if self._closed:
             raise RuntimeError("sandbox is closed")
-        result = self._client.pause(self._sid, ttl_seconds)
+        result = self._client.pause(
+            self._sid, ttl_seconds, timeout_seconds=timeout_seconds
+        )
         pause = PauseResult(
             sandbox_id=str(result.get("sandboxId") or ""),
             snapshot_id=str(result.get("snapshotId") or ""),
