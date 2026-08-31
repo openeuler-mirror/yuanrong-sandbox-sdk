@@ -27,6 +27,7 @@ from .types import (
     SandboxInfo,
     SnapshotInfo,
     ResumeResult,
+    YR_GET_DEFAULT_TIMEOUT,
 )
 
 logger = logging.getLogger(__name__)
@@ -38,6 +39,9 @@ _AFFINITY_REQUIRED = 2
 _LABEL_OPERATION_IN = 0
 _NODE_ID_LABEL = "NODE_ID"
 _SUPPORTED_XPU_TYPES = frozenset({"gpu"})
+_SNAPSHOT_RESOURCE_FIELDS = frozenset(
+    {"cpu", "memory", "cpu_limit", "mem_limit"}
+)
 
 
 def _get_create_timeout(timeout: Optional[int]) -> int:
@@ -184,13 +188,24 @@ class Sandbox:
         snapshot_id: Union[str, SnapshotInfo],
         **kwargs: Any,
     ) -> "Sandbox":
-        """Create a new sandbox by restoring a READY reusable Snapshot."""
+        """Create a new sandbox by restoring a READY reusable Snapshot.
+
+        Resource fields omitted from ``kwargs`` are inherited from the
+        Snapshot. Explicit resource fields override the Snapshot template.
+        """
         value = (
             snapshot_id.snapshot_id
             if isinstance(snapshot_id, SnapshotInfo)
             else snapshot_id
         )
-        return cls(snapshot_id=value, **kwargs)
+        explicit_resource_fields = frozenset(kwargs).intersection(
+            _SNAPSHOT_RESOURCE_FIELDS
+        )
+        return cls(
+            snapshot_id=value,
+            _snapshot_resource_fields=explicit_resource_fields,
+            **kwargs,
+        )
 
     @staticmethod
     def _snapshot_info(payload: Mapping[str, Any]) -> SnapshotInfo:
@@ -306,6 +321,7 @@ class Sandbox:
         node_id: Optional[str] = None,
         *,
         snapshot_id: Optional[str] = None,
+        failover: bool = False,
         xpu: Optional[str] = None,
         storage_mb: Optional[int] = None,
         storage_limit_mb: int = 0,
@@ -313,6 +329,7 @@ class Sandbox:
         create_timeout: Optional[int] = None,
         connection: Optional[ConnectionConfig] = None,
         extra_config: Optional[Dict[str, Any]] = None,
+        _snapshot_resource_fields: Optional[frozenset[str]] = None,
     ):
         """Create a new sandbox.
 
@@ -350,6 +367,8 @@ class Sandbox:
             storage_limit_mb: Writable root filesystem hard limit in MiB. ``0``
                 uses *storage_mb* (or the cluster default when *storage_mb* is
                 omitted).
+            failover: Restore this sandbox on the same node from its latest
+                local anonymous checkpoint after a sandbox failure.
             network: Optional creation-time network policy. Omitting it allows
                 unrestricted network access.
             connection: Explicit frontend and gateway connection settings.
@@ -368,6 +387,8 @@ class Sandbox:
             not isinstance(snapshot_id, str) or not snapshot_id.strip()
         ):
             raise ValueError("snapshot_id must be a non-empty string")
+        if not isinstance(failover, bool):
+            raise TypeError("failover must be a boolean")
         if env is not None and (
             not isinstance(env, Mapping)
             or not all(
@@ -478,6 +499,7 @@ class Sandbox:
         body: Dict[str, Any] = {
             "namespace": "default",
             "snapshotId": snapshot_id.strip() if snapshot_id is not None else None,
+            "failover": failover,
             "idleTimeoutSeconds": idle_timeout,
             "createTimeoutSeconds": resolved_create_timeout,
             "scheduleTimeoutSeconds": resolved_schedule_timeout,
@@ -502,10 +524,20 @@ class Sandbox:
             )
         if name:
             body["name"] = name
-        body["cpu"] = cpu
-        body["memory"] = memory
-        body["cpu_limit"] = cpu_limit
-        body["mem_limit"] = mem_limit
+        resource_values = {
+            "cpu": cpu,
+            "memory": memory,
+            "cpu_limit": cpu_limit,
+            "mem_limit": mem_limit,
+        }
+        serialized_resource_fields = (
+            _SNAPSHOT_RESOURCE_FIELDS
+            if snapshot_id is None or _snapshot_resource_fields is None
+            else _snapshot_resource_fields
+        )
+        for field in ("cpu", "memory", "cpu_limit", "mem_limit"):
+            if field in serialized_resource_fields:
+                body[field] = resource_values[field]
         if xpu is not None:
             body["xpu"] = xpu
         if storage_mb is not None:
@@ -757,7 +789,12 @@ class Sandbox:
             image=info.get("image", self._image),
         )
 
-    def create_snapshot(self, *, name: Optional[str] = None) -> SnapshotInfo:
+    def create_snapshot(
+        self,
+        *,
+        name: Optional[str] = None,
+        timeout_seconds: int = YR_GET_DEFAULT_TIMEOUT,
+    ) -> SnapshotInfo:
         """Create a non-expiring reusable Snapshot and keep this sandbox running."""
         if self._closed:
             raise RuntimeError("sandbox is closed")
@@ -765,22 +802,48 @@ class Sandbox:
             not isinstance(name, str) or not name.strip()
         ):
             raise ValueError("name must be a non-empty string or None")
-        return self._snapshot_info(
-            self._client.create_snapshot(
-                self._sid,
-                name=name.strip() if name is not None else None,
+        if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, int):
+            raise ValueError("timeout_seconds must be a positive integer")
+        if timeout_seconds <= 0 or timeout_seconds > 3600:
+            raise ValueError("timeout_seconds must be between 1 and 3600")
+        tunnel = getattr(self, "_tunnel_client", None)
+        if tunnel is None:
+            return self._snapshot_info(
+                self._client.create_snapshot(
+                    self._sid,
+                    name=name.strip() if name is not None else None,
+                    timeout_seconds=timeout_seconds,
+                )
             )
-        )
+        with tunnel.checkpoint_inflight():
+            return self._snapshot_info(
+                self._client.create_snapshot(
+                    self._sid,
+                    name=name.strip() if name is not None else None,
+                    timeout_seconds=timeout_seconds,
+                )
+            )
 
-    def pause(self, ttl_seconds: int = 90_000) -> PauseResult:
+    def pause(
+        self,
+        ttl_seconds: int = 90_000,
+        *,
+        timeout_seconds: int = YR_GET_DEFAULT_TIMEOUT,
+    ) -> PauseResult:
         """Synchronously pause this sandbox and return its durable snapshot."""
         if isinstance(ttl_seconds, bool) or not isinstance(ttl_seconds, int):
             raise ValueError("ttl_seconds must be a positive integer")
         if ttl_seconds <= 0:
             raise ValueError("ttl_seconds must be a positive integer")
+        if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, int):
+            raise ValueError("timeout_seconds must be a positive integer")
+        if timeout_seconds <= 0 or timeout_seconds > 3600:
+            raise ValueError("timeout_seconds must be between 1 and 3600")
         if self._closed:
             raise RuntimeError("sandbox is closed")
-        result = self._client.pause(self._sid, ttl_seconds)
+        result = self._client.pause(
+            self._sid, ttl_seconds, timeout_seconds=timeout_seconds
+        )
         pause = PauseResult(
             sandbox_id=str(result.get("sandboxId") or ""),
             snapshot_id=str(result.get("snapshotId") or ""),
@@ -813,6 +876,15 @@ class Sandbox:
                 or not resume.route_address or not resume.function_proxy_id):
             raise SandboxError("resume response is not an authoritative RUNNING result")
         return resume
+
+    def reload(self) -> bool:
+        """Restore this sandbox from its latest local anonymous checkpoint."""
+        if self._closed:
+            return False
+        try:
+            return bool(self._client.reload(self._sid).get("success", False))
+        except SandboxError:
+            return False
 
     def _close(self, *, delete_remote: bool) -> None:
         if self._closed:

@@ -1,129 +1,285 @@
-# openyuanrong-sandbox Python SDK
+# openYuanrong Sandbox Python SDK
 
-Python SDK for openYuanrong sandboxes. The transport uses the frontend
-**sandbox v1** HTTP interface backed by RRT, plus the gateway WebSocket route
-for reverse tunnels.
+`openyuanrong-sandbox` is the high-level Python client for the frontend
+**sandbox v1** API. It creates and manages sandboxes, including reusable
+Snapshots and a paused-sandbox lifecycle. It also provides the gateway routes
+used for reverse tunnels.
 
 ```python
 from yr_sandbox import Sandbox
 
-with Sandbox(image="python:3.12-slim", cpu=2000, memory=4096) as sb:
-    sb.files.write("/tmp/hello.txt", "hello world")
-    print(sb.commands.run("cat /tmp/hello.txt").stdout)
+with Sandbox(image="python:3.12-slim", cpu=2000, memory=4096) as sandbox:
+    sandbox.files.write("/tmp/hello.txt", "hello world")
+    print(sandbox.commands.run("cat /tmp/hello.txt").stdout)
 ```
 
-Create and manage non-expiring reusable Snapshots:
+`close()` releases local SDK resources and leaves the remote sandbox alive.
+`kill()` deletes a non-detached remote sandbox as well.
+
+## Lifecycle overview
+
+There are three deliberately different checkpoint paths:
+
+| Path | Public SDK API | Artifact and placement | When to use it |
+| --- | --- | --- | --- |
+| Reusable Snapshot | `create_snapshot()` then `Sandbox.create()` | Immutable, durable artifact. A clone is scheduled on a fresh target and can restore across nodes. | Create many independent sandboxes from a prepared source. |
+| Pause / resume | `pause()` then `resume()` | Durable paused-sandbox artifact. Resume is scheduled on a fresh target; it is not tied to the source node. | Temporarily stop one logical sandbox and later continue it. |
+| Local recovery | `failover=True` or `reload()` | Latest local recovery candidate on the owning node only. Internal checkpoints and Pause-created artifacts can both carry the candidate flag; it is never a reusable or cross-node artifact. | Recover a running sandbox on its original node. |
+
+The SDK is a client-side validation, request-ID, attempt, and result-shaping
+layer. Frontend and FunctionSystem own lifecycle state, scheduling, checkpoint
+bytes, and the final READY/PAUSED/RUNNING transition.
+
+## Reusable Snapshots
+
+Create a reusable Snapshot from an open sandbox:
 
 ```python
 from yr_sandbox import Sandbox
 
-source = Sandbox(name="source")
-snapshot = source.create_snapshot(name="python-ready")  # source remains running
-clone = Sandbox.create(snapshot, name="clone")
+source = Sandbox(image="python:3.12-slim", name="source")
+snapshot = source.create_snapshot(name="python-ready")
 
-snapshots, next_page_token = Sandbox.list_snapshots(
-    name="python-ready",
-    page_size=20,
-)
-same_snapshot = Sandbox.get_snapshot(snapshot.snapshot_id)
-Sandbox.delete_snapshot(same_snapshot.snapshot_id)
+# The source stays running. `snapshot` is a SnapshotInfo value.
+clone = Sandbox.create(snapshot, name="worker-1")
 
 clone.kill()
 source.kill()
 ```
 
-`SnapshotInfo` contains the stable `snapshot_id` and `names`. Snapshot objects
-have no TTL; callers own their lifecycle and delete them explicitly. Creating a
-clone accepts either a `SnapshotInfo` or an ID and follows the ordinary sandbox
-create path for its new name, resources, placement, and routes.
+The public signature is:
 
-Request whole GPUs with the ``type:model:count`` form:
+```python
+Sandbox.create_snapshot(*, name=None, timeout_seconds=300) -> SnapshotInfo
+```
+
+`name` is optional, but if supplied it must be a nonblank string.
+`timeout_seconds` must be an integral, non-boolean value from 1 through 3600.
+The result is a frozen `SnapshotInfo(snapshot_id: str, names: tuple[str, ...])`.
+The Snapshot has no TTL: delete it explicitly when it is no longer needed.
+
+```python
+same_snapshot = Sandbox.get_snapshot(snapshot.snapshot_id)
+snapshots, next_page_token = Sandbox.list_snapshots(
+    name="python-ready", page_size=20,
+)
+Sandbox.delete_snapshot(same_snapshot.snapshot_id)
+```
+
+The source must have a valid lifecycle identity. In particular, a sandbox with
+an active reverse tunnel cannot create a reusable Snapshot. A successful
+Snapshot leaves the source running and publishes an immutable artifact; the
+server records READY metadata only after that artifact is available.
+The SDK does not expose the reusable-Snapshot request ID and generates a fresh
+identity for each call. Raw HTTP clients that retry an uncertain request must
+reuse it only for the same source and name; they must not reuse one request ID
+for different catalog content.
+The SDK keeps its local tunnel client active while the checkpoint request is
+in flight; expected reconnect noise during that scope is logged at debug level
+without changing the checkpoint result.
+
+### Create from Snapshot
+
+Use `Sandbox.create(snapshot_id, **kwargs)` with either a `SnapshotInfo` or a
+Snapshot ID string. It performs the normal sandbox create request with a
+`snapshotId`, so the result is a new `Sandbox` handle that reaches RUNNING in
+the usual way.
+
+```python
+clone = Sandbox.create(
+    snapshot,
+    name="worker-2",
+    cpu=2000,
+    memory=8192,
+)
+```
+
+The backend reuses the source template and immutable artifact only after it
+validates Snapshot/template compatibility. CPU and memory resource *presence*
+controls inheritance: an omitted or non-positive `cpu` or `memory` copies the
+corresponding complete source resource, including its stored limit. A positive
+`cpu` or `memory` creates a target resource and replaces that source resource.
+Positive `cpu_limit` or `mem_limit` sets a limit on the new target resource;
+there is no independent limit-presence inheritance switch, so an omitted value
+or default `0` cannot independently request or suppress a template limit.
+Options that affect the restored template must remain compatible. The current
+server applies the source template's create options during restore but does not
+independently reject every source/target reverse-tunnel mismatch. Callers must
+therefore create tunnel-enabled clones from a template with the same tunnel
+shape; otherwise the returned route may not correspond to a provisioned
+tunnel. The clone has a fresh logical identity and fresh scheduler placement
+according to its create request. A reusable Snapshot is not consumed. The
+backend rejects a non-READY or unavailable Snapshot and a resource-type change.
+
+## Pause and resume
+
+Pause one open sandbox and later resume the same logical sandbox:
+
+```python
+sandbox = Sandbox(image="python:3.12-slim")
+
+paused = sandbox.pause(ttl_seconds=90_000, timeout_seconds=300)
+print(paused.snapshot_id, paused.expires_at)
+
+running = sandbox.resume()
+print(running.route_address, running.port_mappings)
+```
+
+The public signatures are:
+
+```python
+Sandbox.pause(ttl_seconds=90_000, *, timeout_seconds=300) -> PauseResult
+Sandbox.resume() -> ResumeResult
+```
+
+The SDK accepts only a positive integral, non-boolean `ttl_seconds`; its
+default is 90,000 seconds. `timeout_seconds` is keyword-only and must be an
+integral, non-boolean value from 1 through 3600. A successful pause returns a
+frozen `PauseResult` with `sandbox_id`, `snapshot_id`, byte `size`, `state`,
+and `expires_at`. The SDK rejects a response unless it describes this sandbox,
+has state `"paused"`, and includes a nonempty snapshot ID, positive size, and
+positive expiry.
+
+`resume()` returns a frozen `ResumeResult` with `sandbox_id`, `state`,
+`route_address`, `function_proxy_id`, `node_id`, and `port_mappings`. The SDK
+requires the response to identify this sandbox, report `"running"`, and
+include a route address and function-proxy ID. Resume restores the durable
+paused artifact on a scheduler-selected target, rearms the restored runtime's
+listener, and then commits the RUNNING result. Route-cache convergence after
+that result is outside the resume success boundary.
+
+Pausing creates durable remote bytes and transitions the logical sandbox to
+PAUSED; it clears the old runtime/container/endpoint. Resuming requires the
+authoritative PAUSED identity and its durable Snapshot. It can run on a
+different node from the pre-pause sandbox.
+
+## Failover and reload are local recovery
+
+`failover` is a creation option, not an imperative lifecycle method:
+
+```python
+sandbox = Sandbox(image="python:3.12-slim", failover=True)
+```
+
+With `failover=True`, FunctionSystem may recover a suitable running sandbox
+only from its latest local recovery candidate. Recovery stays on the owning
+Proxy/Agent/node and does not use reusable Snapshot metadata. The selector
+filters the durable `localRecoveryCandidate` flag rather than a separate
+internal-only type, so both internal checkpoints and Pause-created artifacts can
+be marked and selected as candidates. A missing candidate is a recovery failure: it never
+starts a replacement from scratch or silently discards state. Failure handling
+depends on the source state: a current RUNNING sandbox becomes FATAL, while an
+EVICTED sandbox continues ghost-cleanup reconciliation.
+
+For an explicit local-recovery request, use:
+
+```python
+ok = sandbox.reload()
+```
+
+`Sandbox.reload() -> bool` does not replace the `Sandbox` object or any of its
+command, filesystem, shell, or PTY facades. It restores the same logical
+sandbox using the local recovery path with failover policy disabled, and it
+requires an existing latest local recovery candidate under the same flag-based
+selection rule. A missing candidate
+fails; reload never starts a replacement from scratch or silently discards
+state. The HTTP operation returns `{"success": true|false}`. The SDK returns
+`False` for a closed sandbox or `SandboxError`. If FunctionSystem has already
+stopped the source and recovery then fails, treat `False` as a failed recovery;
+current FunctionSystem cannot restore that source automatically.
+
+## Timeouts, attempts, and errors
+
+For `create_snapshot()` and `pause()`, `timeout_seconds` defaults to the
+public `YR_GET_DEFAULT_TIMEOUT` value of 300 seconds. It is the logical server
+checkpoint timeout sent as `timeoutSeconds`; each SDK HTTP attempt uses that
+logical value plus a 30-second transport buffer. `resume()` and `reload()`
+have no public logical-timeout body field and use the SDK default plus that
+buffer for each transport attempt. SDK argument errors are raised
+before any request; closed `create_snapshot`, `pause`, and `resume` handles
+raise `RuntimeError`.
+
+The SDK generates request IDs; callers of `Sandbox` cannot set them. Its
+attempt rules intentionally differ by operation:
+
+- Reusable Snapshot creation makes one SDK transport attempt only. A connection problem or
+  gateway 502/503/504 produces `SandboxError` with an **uncertain** outcome,
+  because the immutable Snapshot might already have committed. Reconcile it
+  explicitly instead of assuming that another attempt is safe.
+- Pause, resume, and reload make up to three transport attempts for transient transport
+  or gateway failures, all with one internal request ID. If the final result is
+  still uncertain, reconcile the instance state instead of changing the request
+  under that identity.
+- Create from Snapshot uses the normal create policy with up to three attempts
+  and one `create-*` identity. An unnamed attempt that reaches another frontend
+  can make an extra sandbox, so give important clones a name and reconcile
+  uncertain outcomes.
+
+Transport and business failures, malformed Snapshot identity results, and
+exhausted attempt budgets raise `SandboxError`. Other malformed typed-result
+shapes can instead surface `ValueError` or `TypeError` while values are
+converted, or `RuntimeError` when resume `portMappings` is not an object.
+`reload()` translates `SandboxError` into `False`; it does not normalize those
+other programming/shape exceptions.
+
+### SDK versus raw HTTP
+
+These are SDK semantics, not a substitute for the frontend REST contract.
+The SDK uses these paths internally:
+
+```text
+POST /api/sandbox/v1/sandboxes/{id}/snapshots
+POST /api/sandbox/v1/sandboxes                 # create from Snapshot: snapshotId
+POST /api/sandbox/v1/sandboxes/{id}/pause
+POST /api/sandbox/v1/sandboxes/{id}/resume
+POST /api/sandbox/v1/sandboxes/{id}/reload
+```
+
+Raw HTTP has intentionally different validation in a few places. A raw
+Snapshot request has `name` as its handler field: an omitted or empty name is
+accepted, while a supplied whitespace-only name is rejected. Its
+`timeoutSeconds` defaults to 300, is validated in the range 1 through 3600,
+converted to milliseconds, and forwarded as the checkpoint/direct-proxy
+logical timeout. Raw Pause applies the same `timeoutSeconds` contract, while
+treating omitted or zero `ttlSeconds` as 90,000 seconds and rejecting negative,
+malformed, or non-numeric JSON values; the SDK is deliberately stricter about
+TTL. Only Snapshot and Pause currently accept this caller-provided logical
+timeout body field. The SDK sends `{}` for resume and reload, and their
+handlers define no body fields. Raw HTTP requires a pattern-valid
+`X-YR-Request-ID` header;
+the SDK generates that header internally.
+
+The legacy runtime surface in `api/python/yr` is separate from this SDK:
+`snapshot_instance(instance_id, ttl=-1, leave_running=False, function_type="")`,
+`snapstart_instance(checkpoint_id)`, and `reload_instance(instance_id)` are
+lower-level signal-18/19/25 primitives. They are not `Sandbox` result aliases.
+
+## Other create options
+
+Request whole GPUs with `type:model:count`:
 
 ```python
 Sandbox(xpu="gpu:l20:1")
 Sandbox(xpu="gpu:h100:2")
 Sandbox(xpu="gpu::1")  # any GPU model
-Sandbox()  # no XPU request
 ```
 
-The first version accepts one request, supports only ``gpu``, and requires a
-positive whole-device count. Type matching is case-insensitive in the SDK, and
-the value is forwarded unchanged; Frontend normalizes the resource type for
-FunctionSystem. An empty model keeps the three-field form and lets
-FunctionSystem select any model.
+The SDK currently accepts one whole-device `gpu` request with a positive count.
+An empty model leaves FunctionSystem to select a model.
 
-Request temporary writable storage:
+Temporary writable storage is specified in MiB:
 
 ```python
-from yr_sandbox import Sandbox
-
 Sandbox(storage_mb=153600, storage_limit_mb=204800)
 ```
 
-`storage_mb` is expressed in MiB. Frontend converts it to bytes in the
-FunctionSystem custom resource named `storage`. `storage_limit_mb` is also in
-MiB and sets the writable root filesystem hard limit; `0` uses `storage_mb` or
-the cluster default when `storage_mb` is omitted.
+`storage_limit_mb=0` uses `storage_mb`, or the cluster default when
+`storage_mb` is omitted. A nonzero limit cannot be below `storage_mb`.
 
-Normally, configure only one sandbox create budget; the other value is derived
-automatically with a 30-second startup buffer:
+## Connection configuration
 
-```python
-Sandbox(image="python:3.12-slim", create_timeout=120)   # schedule_timeout=90
-Sandbox(image="python:3.12-slim", schedule_timeout=90) # create_timeout=120
-```
-
-When both values are configured, `schedule_timeout <= create_timeout`, and their
-difference must be at least 30 seconds. The 30-second buffer covers rootfs/image
-preparation, runtime startup, and Running-state confirmation.
-
-Configure a non-default sandbox-side reverse-tunnel proxy port when needed:
-
-```python
-sb = Sandbox(upstream="127.0.0.1:8000", proxy_port=9001)
-assert sb.get_tunnel_url() == "http://127.0.0.1:9001"
-```
-
-The frontend derives the WebSocket port as `proxy_port - 1` and owns both
-internal port mappings. User `port_forwardings` must not reuse either port.
-Call `sb.close()` to release only local SDK resources while keeping the remote
-sandbox alive; call `sb.kill()` to also delete a non-detached remote sandbox.
-
-Creation-time network policies are optional:
-
-```python
-from yr_sandbox import NetworkPolicy, Sandbox
-
-Sandbox()  # unrestricted; no policy is sent
-Sandbox(network=NetworkPolicy.block())
-Sandbox(
-    network=NetworkPolicy.deny_dns("github.com", "*.github.com"),
-)
-```
-
-Block mode denies new network flows except the YuanRong control proxy and
-published sandbox target ports used by frontend direct file I/O, reverse
-tunnels, and explicit user port forwarding. Replies to allowed TCP, UDP, and
-related ICMP traffic are admitted from connection state. Commands and the
-frontend `/direct` filesystem path remain available; bounded RuntimeRPC chunks
-remain a fallback when direct transport fails.
-
-DNS patterns match either one exact name or descendants with a leading
-`*.`; the wildcard does not match the apex. Patterns are lowercased and
-trailing dots are removed. International names must be supplied as ASCII
-punycode. DNS-over-HTTPS and direct connections to a known IP are not covered
-by a DNS blacklist.
-
-`block_network` and `dns_blacklist` cannot be combined. Policies cannot be
-changed through this SDK after creation. The packet ACL is stateful IPv4 and
-supports IPv4 fragments. The target sandboxd node must have network ACL
-support enabled, and existing sandboxes must be drained before an operator
-enables it.
-
-## Configuration
-
-Connection settings can be passed explicitly and reused by every transport
-owned by a sandbox:
+Pass an immutable `ConnectionConfig` to avoid process-global environment
+configuration:
 
 ```python
 from yr_sandbox import ConnectionConfig, Sandbox, resources
@@ -143,92 +299,33 @@ nodes = resources(connection=connection)
 Sandbox.delete("sandbox-id", connection=connection)
 ```
 
-`ConnectionConfig` is immutable and hides its token from `repr`. When it is
-provided, lifecycle HTTP, reverse tunnel URLs, user port URLs, and PTY sessions
-use the object rather than reading the five connection-related `YR_*`
-variables. If it is omitted, the SDK keeps the existing environment fallback:
+Without a `ConnectionConfig`, the SDK reads `YR_SERVER_ADDRESS`, `YR_TOKEN`,
+`YR_TLS`, `YR_GATEWAY_ADDRESS`, and `YR_GATEWAY_TLS`. The gateway address
+defaults to the frontend address for reverse-tunnel, user-port, and PTY routes.
 
-| Var | Meaning |
-| --- | --- |
-| `YR_SERVER_ADDRESS` | Frontend gateway `host:port` for lifecycle, invoke, direct file IO. Required. |
-| `YR_TOKEN` | JWT sent in `X-Auth` where required. |
-| `YR_TLS` | Set `1/true/yes` to use HTTPS for frontend control routes. Default: `0`. |
-| `YR_GATEWAY_ADDRESS` | Optional gateway/router `host:port` for reverse tunnel and user port URLs. Falls back to `YR_SERVER_ADDRESS`. |
-| `YR_GATEWAY_TLS` | Set `1/true/yes` to use WSS for gateway tunnel routes and HTTPS for user port URLs. Default: `0`. |
-| `YR_TUNNEL_CONNECT_TIMEOUT` | Reverse tunnel WebSocket connection wait in seconds. Default: `60`. |
-| `YR_TUNNEL_PROTOCOL_VERSION` | Highest reverse-tunnel protocol version to advertise. Default/cap: `2`. |
-| `YR_TUNNEL_MAX_BODY_SIZE` | Per-request or response HTTP body bound advertised to the peer. HTTP bodies are streamed. Default: `512 MiB`; cap: `1 GiB`. |
-| `YR_TUNNEL_MAX_WS_MESSAGE_SIZE` | Per-message application WebSocket bound advertised separately because each message is reassembled. Default/cap: `8 MiB`; set a lower value for tighter memory budgets. Use application-level chunking for larger payloads. |
-| `YR_TUNNEL_STREAM_CHUNK_BYTES` | V2 binary-frame payload bound. Default/cap: `64 KiB`; minimum: `1 KiB`. The fixed cap keeps the global 480-frame data budget below `30 MiB`. |
-| `YR_TUNNEL_MAX_INFLIGHT` | Concurrent tunnel HTTP work bound. Default: `16`; cap: `1024`. |
-| `YR_TUNNEL_STREAM_WINDOW_FRAMES` | Per-stream credit window and request queue bound. Default: `16`; cap: `1024`, further reduced so all negotiated HTTP windows fit the fixed outbound frame budget. |
-| `YR_TUNNEL_FAST_PATH_BODY_BYTES` | Largest request/response kept on the small JSON fast path after V2 negotiation. Default: `64 KiB`; capped at the V1-safe `5 MiB` control-frame bound. |
-| `YR_SANDBOX_CREATE_TIMEOUT` | Sandbox end-to-end create budget in seconds. Default: `60`; must be greater than the 30-second scheduling buffer. |
-
-Tunnel limits are process-local, optional overrides. The SDK and rrt-runtime
-advertise their values in `hello` and use the lower value, so existing AKernel
-sandbox creation does not need to inject matching variables for the defaults.
-HTTP body and application WebSocket message limits are negotiated separately:
-large HTTP bodies stay streaming, while a WebSocket message is reassembled and
-therefore uses the lower bounded limit.
-Text WebSocket messages also have to fit the fixed `8 MiB` JSON control frame;
-oversized/escape-expanded text is rejected on that channel without resetting
-the tunnel. Large payload protocols should use application-level binary chunks.
-
-## Build
+## Build and test
 
 From this directory:
 
 ```bash
 PYTHON=python3 bash build.sh /tmp/openyuanrong-sandbox-dist
+PYTHONPATH=. python3 -m unittest discover -s tests/unit
 ```
 
-From the repository root, the build wrapper does the same:
-
-```bash
-PYTHON=python3 bash ../build.sh /tmp/openyuanrong-sandbox-dist
-```
-
-## Test
-
-Offline transport/unit checks:
-
-```bash
-PYTHONPATH=. python3 tests/test_transport_direct.py
-```
-
-Live K8S/frontend checks need `YR_SERVER_ADDRESS`, `YR_GATEWAY_ADDRESS`, and a
-valid token:
+Live K8S/frontend checks also need `YR_SERVER_ADDRESS`,
+`YR_GATEWAY_ADDRESS`, and a valid token:
 
 ```bash
 PYTHONPATH=. python3 tests/e2e_rrt_direct.py
 PYTHONPATH=. python3 examples/reverse_tunnel.py
 ```
 
-## Runnable examples
-
-Only examples expected to run in ordinary SDK/K8S smoke environments are kept:
-
-- `examples/basic_usage.py`
-- `examples/command_stdin.py`
-- `examples/persistent_shell.py`
-- `examples/tunnel_large_response.py`
-- `examples/port_forwarding.py`
-- `examples/reverse_tunnel.py`
-- `examples/named_sandbox.py`
-- `examples/bench_cp.py`
-
-Infra-specific demos should be documented separately instead of being shipped as
-runnable SDK examples.
-
 ## Architecture
 
-- **Control plane** — `POST /api/sandbox/v1/sandboxes`, `DELETE …/{id}`,
-  `POST …/{id}/invoke` with the unified `{action, args}` model (`yr_sandbox/_transport.py`).
+- **Control plane** — sandbox v1 create, delete, lifecycle, and invoke routes.
 - **Direct data plane** — frontend/gateway `/direct/{sandbox}/...` routes for
-  command invoke and binary file upload/download.
+  command invoke and binary file I/O.
 - **Reverse tunnel** — gateway `/tunnel/{sandbox}` WebSocket back to a local
-  upstream (`yr_sandbox/tunnel_client.py`). Local upstream requests intentionally ignore
-  host proxy environment variables.
+  upstream (`yr_sandbox/tunnel_client.py`).
 
 See [`TODO.md`](TODO.md) for remaining SDK work.

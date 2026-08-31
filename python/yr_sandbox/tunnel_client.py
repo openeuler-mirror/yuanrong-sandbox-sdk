@@ -234,6 +234,8 @@ class TunnelClient:
         self._session_id = str(uuid.uuid4())
         self._resume_state: Optional[dict[str, Any]] = None
         self._http_client: Optional[httpx.AsyncClient] = None
+        self._checkpoint_scope_depth = 0
+        self._checkpoint_scope_lock = threading.Lock()
 
     def start(self, tunnel_ws_url: str, timeout: float = 60) -> bool:
         """Start the tunnel client in a background thread.
@@ -271,6 +273,35 @@ class TunnelClient:
             # closes the WebSocket above, letting _connect_loop exit cleanly.
             self._loop.call_soon_threadsafe(self._loop.stop)
             self._thread.join(timeout=2)
+
+    @contextlib.contextmanager
+    def checkpoint_inflight(self):
+        """Mark a checkpoint operation while allowing tunnel recovery to continue.
+
+        Checkpointing may briefly interrupt the sandbox-side tunnel while
+        runtime listeners are preserved or re-armed. This scope only
+        downgrades expected reconnect noise; the reconnect loop and resumable
+        in-flight request handling remain unchanged.
+        """
+        with self._checkpoint_scope_lock:
+            self._checkpoint_scope_depth += 1
+        try:
+            yield
+        finally:
+            with self._checkpoint_scope_lock:
+                self._checkpoint_scope_depth = max(
+                    0, self._checkpoint_scope_depth - 1
+                )
+
+    def _checkpoint_is_inflight(self) -> bool:
+        with self._checkpoint_scope_lock:
+            return self._checkpoint_scope_depth > 0
+
+    def _log_reconnect(self, level: int, message: str, *args: Any) -> None:
+        if self._checkpoint_is_inflight():
+            logger.debug("checkpoint in-flight; " + message, *args)
+            return
+        logger.log(level, message, *args)
 
     def _run_loop(self, tunnel_ws_url: str) -> None:
         self._loop = asyncio.new_event_loop()
@@ -419,7 +450,8 @@ class TunnelClient:
                     failures = 0
                 failures += 1
                 if failures == 1 or failures % 10 == 0:
-                    logger.warning(
+                    self._log_reconnect(
+                        logging.WARNING,
                         "TunnelClient disconnected (attempt %d): %s", failures, e
                     )
                 if self._stopping.is_set():
@@ -437,14 +469,15 @@ class TunnelClient:
                         failures > _ROUTE_404_WARNING_THRESHOLD
                         and failures % _ROUTE_404_WARNING_INTERVAL == 0
                     )
-                    log = logger.warning if warn else logger.debug
-                    log(
+                    self._log_reconnect(
+                        logging.WARNING if warn else logging.DEBUG,
                         "TunnelClient route unavailable "
                         "(HTTP 404, attempt %d); retrying",
                         failures,
                     )
                 else:
-                    logger.warning(
+                    self._log_reconnect(
+                        logging.WARNING,
                         "TunnelClient WebSocket handshake rejected "
                         "(HTTP %d, attempt %d): %s",
                         status_code,
@@ -457,7 +490,9 @@ class TunnelClient:
                 await asyncio.sleep(_RECONNECT_DELAY)
             except Exception as e:
                 failures += 1
-                logger.error("TunnelClient unexpected error: %s", e)
+                self._log_reconnect(
+                    logging.ERROR, "TunnelClient unexpected error: %s", e
+                )
                 if self._stopping.is_set():
                     await self._close_shared_http_client()
                     return
@@ -583,7 +618,8 @@ class TunnelClient:
                     )
                 except asyncio.TimeoutError:
                     heartbeat_timed_out.set()
-                    logger.warning(
+                    self._log_reconnect(
+                        logging.WARNING,
                         "TunnelClient application heartbeat timed out after %.1fs",
                         self._ping_timeout,
                     )

@@ -161,6 +161,21 @@ class SDKContractTests(unittest.TestCase):
         self.assertNotIn("runtime", body)
         self.assertEqual(body["rootfs"]["runtime"], "gvisor-next")
 
+    def test_failover_defaults_false_and_forwards_true(self):
+        with patch("yr_sandbox.sandbox_api.SandboxClient", _FakeClient):
+            Sandbox(image="ubuntu:22.04", detached=True)
+            Sandbox(image="ubuntu:22.04", failover=True, detached=True)
+
+        self.assertIs(_FakeClient.created[-2]["failover"], False)
+        self.assertIs(_FakeClient.created[-1]["failover"], True)
+
+    def test_failover_rejects_non_boolean_values(self):
+        with (
+            patch("yr_sandbox.sandbox_api.SandboxClient", _FakeClient),
+            self.assertRaisesRegex(TypeError, "failover"),
+        ):
+            Sandbox(image="ubuntu:22.04", failover=1, detached=True)
+
     def test_node_id_is_encoded_as_frontend_affinity_semantics(self):
         with patch("yr_sandbox.sandbox_api.SandboxClient", _FakeClient):
             Sandbox(
