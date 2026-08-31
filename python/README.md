@@ -278,7 +278,7 @@ Sandbox(storage_mb=153600, storage_limit_mb=204800)
 
 ## Network policies
 
-Creation-time network policies are optional:
+Creation-time network policies are optional and can be replaced at runtime:
 
 ```python
 from yr_sandbox import NetworkPolicy, NetworkRule, PortRange, Sandbox
@@ -302,6 +302,20 @@ Sandbox(
     )
 )
 ```
+A running sandbox accepts whole-policy replacement through
+`update_network_policy`:
+
+```python
+sandbox = Sandbox()
+sandbox.update_network_policy(NetworkPolicy.block())
+sandbox.update_network_policy(
+    NetworkPolicy.deny_dns("github.com", "*.github.com")
+)
+sandbox.update_network_policy(None)  # clear and restore unrestricted networking
+```
+
+The desired policy survives sandboxd restarts, explicit reloads, and same-node
+failover. Each call is atomic at the sandbox data plane.
 
 Block mode denies new network flows except the YuanRong control proxy and
 published sandbox target ports used by frontend direct file I/O, reverse
@@ -334,8 +348,8 @@ must add the matching egress sandbox-source-port rule when replies are needed.
 This keeps a published port from becoming a generic egress bypass.
 
 Legacy `block_network` and `dns_blacklist` cannot be combined with each other
-or with schema v2 sections. Policies cannot be changed through this SDK after
-creation. Packet ACLs are IPv4 and support IPv4 fragments. The target sandboxd
+or with schema v2 sections. Policy updates replace the complete policy. Packet
+ACLs are IPv4 and support IPv4 fragments. The target sandboxd
 node drops IPv6 traffic whenever a traffic or DNS policy is active. Arbitrary
 non-IP Ethernet protocols are outside the portable ACL contract. The node must
 have network ACL support enabled, and existing sandboxes must be drained before

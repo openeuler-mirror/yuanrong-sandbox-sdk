@@ -379,7 +379,7 @@ class DNSPolicy:
 
 @dataclass(frozen=True)
 class NetworkPolicy:
-    """Creation-time network policy for a sandbox.
+    """Network policy for sandbox creation and atomic runtime replacement.
 
     ``block_network`` denies new sandbox network flows except the YuanRong
     control proxy and published sandbox ports required by SDK routes and

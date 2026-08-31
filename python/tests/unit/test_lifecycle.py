@@ -411,6 +411,35 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(seen["url"], "wss://gateway.example:8443/tunnel/sandbox-1")
         self.assertEqual(seen["token"], "secret")
 
+    def test_update_network_policy_replaces_and_clears_policy(self):
+        class Client(_CloseTracker):
+            def update_network_policy(self, sandbox_id, policy):
+                self.updates = getattr(self, "updates", [])
+                self.updates.append((sandbox_id, policy))
+                return {"success": True}
+
+        sandbox = object.__new__(Sandbox)
+        sandbox._client = Client()
+        sandbox._sid = "default-sandbox-1"
+        sandbox._closed = False
+
+        sandbox.update_network_policy(yr_sandbox.NetworkPolicy.block())
+        sandbox.update_network_policy(yr_sandbox.NetworkPolicy())
+        sandbox.update_network_policy(None)
+
+        self.assertEqual(
+            sandbox._client.updates,
+            [
+                ("default-sandbox-1", {"blockNetwork": True}),
+                ("default-sandbox-1", {}),
+                ("default-sandbox-1", {}),
+            ],
+        )
+        with self.assertRaises(TypeError):
+            sandbox.update_network_policy({"blockNetwork": True})
+        sandbox._closed = True
+        with self.assertRaises(RuntimeError):
+            sandbox.update_network_policy(None)
 
 if __name__ == "__main__":
     unittest.main()
