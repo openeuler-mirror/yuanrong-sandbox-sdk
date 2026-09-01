@@ -33,7 +33,7 @@ from .types import (
 logger = logging.getLogger(__name__)
 
 DEFAULT_SCHEDULE_TIMEOUT = 30
-INIT_CALL_TIMEOUT = 305
+INIT_CALL_TIMEOUT = 30
 CREATE_TIMEOUT_BUFFER = 30
 CREATE_TIMEOUT_RESERVE = INIT_CALL_TIMEOUT + CREATE_TIMEOUT_BUFFER
 _AFFINITY_KIND_RESOURCE = 0
@@ -353,7 +353,7 @@ class Sandbox:
             mem_limit: Memory cgroup limit in MB (0 = same as *memory*).
             idle_timeout: Seconds before idle sandbox is reclaimed (default 300).
             create_timeout: Logical create budget in seconds. By default it is
-                derived as ``schedule_timeout + 335``. An
+                derived as ``schedule_timeout + 60``. An
                 ``YR_SANDBOX_CREATE_TIMEOUT`` value or a legacy explicit pair
                 that leaves the former 30-second response buffer remains
                 accepted; the SDK expands its effective create budget to also

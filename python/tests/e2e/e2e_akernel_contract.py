@@ -103,7 +103,7 @@ try:
         cwd="/tmp",
         node_id=expected_node or None,
         memory=memory,
-        create_timeout=455,
+        create_timeout=180,
         schedule_timeout=120,
     )
     check("create", bool(sandbox.id), sandbox.id)
