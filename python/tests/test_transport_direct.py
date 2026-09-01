@@ -81,6 +81,27 @@ def test_create_uses_sse_and_returns_running_final():
     print("ok: create uses SSE and returns running final")
 
 
+def test_create_transport_default_covers_default_logical_budget():
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["read_timeout"] = request.extensions["timeout"]["read"]
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            text=(
+                'event: final\n'
+                'data: {"sandboxId":"sandbox-default-timeout","status":"running"}\n\n'
+            ),
+        )
+
+    c = _make_client(handler)
+    result = c.create_info({"name": "sandbox-default-timeout"})
+    _check(result["status"] == "running", f"create status: {result}")
+    _check(119 < seen["read_timeout"] <= 120, f"request timeout: {seen}")
+    print("ok: create transport default covers 90-second logical budget")
+
+
 def test_create_rejects_timeout_final():
     seen = {}
 
@@ -1631,6 +1652,7 @@ def test_safe_id_matches_router_sanitize():
 
 if __name__ == "__main__":
     test_create_uses_sse_and_returns_running_final()
+    test_create_transport_default_covers_default_logical_budget()
     test_create_rejects_timeout_final()
     test_create_rejects_stream_without_final()
     test_sandbox_create_timeout_precedence_and_body()
