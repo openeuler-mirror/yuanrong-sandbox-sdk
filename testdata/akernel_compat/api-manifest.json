@@ -21,6 +21,11 @@
     "S3Config",
     "PortForwarding",
     "NetworkPolicy",
+    "NetworkRule",
+    "PortRange",
+    "TrafficPolicy",
+    "DNSPolicy",
+    "DNSRule",
     "NodeInfo",
     "resources",
     "SDK_CAPABILITIES"

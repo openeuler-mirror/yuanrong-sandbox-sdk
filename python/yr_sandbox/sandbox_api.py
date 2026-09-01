@@ -886,6 +886,27 @@ class Sandbox:
         except SandboxError:
             return False
 
+    def update_network_policy(
+        self, policy: Optional[NetworkPolicy]
+    ) -> None:
+        """Atomically replace this sandbox's complete network policy.
+
+        Passing None or an empty NetworkPolicy clears the policy and restores
+        unrestricted networking.
+        """
+        if policy is not None and not isinstance(policy, NetworkPolicy):
+            raise TypeError("policy must be a NetworkPolicy or None")
+        if self._closed:
+            raise RuntimeError("sandbox is closed")
+        body = (
+            {}
+            if policy is None or policy.is_empty
+            else policy.to_dict()
+        )
+        result = self._client.update_network_policy(self._sid, body)
+        if not bool(result.get("success", False)):
+            raise SandboxError("network policy update was not acknowledged")
+
     def _close(self, *, delete_remote: bool) -> None:
         if self._closed:
             return

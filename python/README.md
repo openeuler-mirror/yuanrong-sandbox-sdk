@@ -276,6 +276,85 @@ Sandbox(storage_mb=153600, storage_limit_mb=204800)
 `storage_limit_mb=0` uses `storage_mb`, or the cluster default when
 `storage_mb` is omitted. A nonzero limit cannot be below `storage_mb`.
 
+## Network policies
+
+Creation-time network policies are optional and can be replaced at runtime:
+
+```python
+from yr_sandbox import NetworkPolicy, NetworkRule, PortRange, Sandbox
+
+Sandbox()  # unrestricted; no policy is sent
+Sandbox(network=NetworkPolicy.block())
+Sandbox(
+    network=NetworkPolicy.deny_dns("github.com", "*.github.com"),
+)
+Sandbox(
+    network=NetworkPolicy.allowlist(
+        [
+            NetworkRule(domain="api.github.com", protocol="tcp", port_range=443),
+            NetworkRule(cidr="10.0.0.2/32", protocol="tcp", port_range=22773),
+            NetworkRule(
+                cidr="192.0.2.0/24",
+                protocol="tcp",
+                port_range=PortRange(8000, 8010),
+            ),
+        ]
+    )
+)
+```
+A running sandbox accepts whole-policy replacement through
+`update_network_policy`:
+
+```python
+sandbox = Sandbox()
+sandbox.update_network_policy(NetworkPolicy.block())
+sandbox.update_network_policy(
+    NetworkPolicy.deny_dns("github.com", "*.github.com")
+)
+sandbox.update_network_policy(None)  # clear and restore unrestricted networking
+```
+
+The desired policy survives sandboxd restarts, explicit reloads, and same-node
+failover. Each call is atomic at the sandbox data plane.
+
+Block mode denies new network flows except the YuanRong control proxy and
+published sandbox target ports used by frontend direct file I/O, reverse
+tunnels, and explicit user port forwarding. Replies to allowed TCP, UDP, and
+related ICMP traffic are admitted from connection state. Commands and the
+frontend `/direct` filesystem path remain available; bounded RuntimeRPC chunks
+remain a fallback when direct transport fails.
+
+DNS patterns match either one exact name or descendants with a leading
+`*.`; the wildcard does not match the apex. Patterns are lowercased and
+trailing dots are removed. International names are normalized to ASCII
+punycode. DNS-over-HTTPS and direct connections to a known IP are not covered
+by a DNS blacklist.
+
+The generic schema v2 API combines IPv4/CIDR and dynamic domain rules with
+TCP, UDP, ICMP, peer or sandbox port ranges, priorities, independent ingress
+and egress defaults, and stateful or stateless handling. Higher priorities win;
+at equal priority, deny wins. Exact domains match only themselves. A leading
+`*.` matches descendants but not the apex. Domain authorization follows the
+complete CNAME chain, uses a DNS TTL clamped to 1..3600 seconds, and is replaced
+only by later IPv4 A or ANY answers rather than parallel AAAA queries.
+`NetworkPolicy.allowlist` defaults to ingress allow, egress deny, and stateful
+replies. A DNS policy or domain rule forces ordinary TCP and UDP DNS through
+sandboxd's managed resolver; allowing another port-53 endpoint does not bypass
+it. Construct `TrafficPolicy`, `DNSPolicy`, and `DNSRule` directly for the
+low-level model. Domain grants enforce at IPv4 and transport layers, so another
+virtual host sharing an authorized address and port is not distinguishable.
+With stateless mode, protected published-port rules are ingress-only; callers
+must add the matching egress sandbox-source-port rule when replies are needed.
+This keeps a published port from becoming a generic egress bypass.
+
+Legacy `block_network` and `dns_blacklist` cannot be combined with each other
+or with schema v2 sections. Policy updates replace the complete policy. Packet
+ACLs are IPv4 and support IPv4 fragments. The target sandboxd
+node drops IPv6 traffic whenever a traffic or DNS policy is active. Arbitrary
+non-IP Ethernet protocols are outside the portable ACL contract. The node must
+have network ACL support enabled, and existing sandboxes must be drained before
+an operator enables it.
+
 ## Connection configuration
 
 Pass an immutable `ConnectionConfig` to avoid process-global environment
@@ -310,6 +389,17 @@ From this directory:
 ```bash
 PYTHON=python3 bash build.sh /tmp/openyuanrong-sandbox-dist
 PYTHONPATH=. python3 -m unittest discover -s tests/unit
+```
+
+The parent YuanRong build passes `BUILD_VERSION` so this wheel has the same
+version as the control-plane component wheels. Standalone release builds may
+set it explicitly, for example `BUILD_VERSION=0.10.0`; an
+`YR_RELEASE_TAG`/`BUILDKITE_TAG` still takes precedence.
+
+From the repository root, the build wrapper does the same:
+
+```bash
+PYTHON=python3 bash ../build.sh /tmp/openyuanrong-sandbox-dist
 ```
 
 Live K8S/frontend checks also need `YR_SERVER_ADDRESS`,

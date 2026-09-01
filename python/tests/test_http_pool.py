@@ -34,6 +34,9 @@ class _EchoHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def do_PUT(self) -> None:
+        self.do_GET()
+
     def log_message(self, _format: str, *_args) -> None:
         pass
 
@@ -124,6 +127,24 @@ def test_tokens_and_cookies_are_request_scoped(monkeypatch):
     finally:
         first.close()
         second.close()
+        _stop_server(server, thread)
+
+
+def test_put_uses_shared_client_and_request_token(monkeypatch):
+    server, thread = _start_server()
+    address = f"127.0.0.1:{server.server_port}"
+    client = _new_client(monkeypatch, address, "put-token")
+    url = f"http://{address}/network"
+    try:
+        response = client._http.put(url, timeout=5).json()
+
+        assert response["token"] == "put-token"
+        assert response["cookie"] is None
+        snapshot = _SHARED_HTTP_CLIENT_REGISTRY.snapshot()
+        key = (os.getpid(), "http", address, False)
+        assert snapshot[key][1] == 1
+    finally:
+        client.close()
         _stop_server(server, thread)
 
 

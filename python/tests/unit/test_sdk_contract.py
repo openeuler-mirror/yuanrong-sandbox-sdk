@@ -6,10 +6,15 @@ from unittest.mock import patch
 import yr_sandbox
 from yr_sandbox import (
     ConnectionConfig,
-    PortForwarding,
+    DNSPolicy,
+    DNSRule,
     NetworkPolicy,
+    NetworkRule,
+    PortForwarding,
+    PortRange,
     S3Config,
     Sandbox,
+    TrafficPolicy,
 )
 from yr_sandbox.commands import Commands
 from yr_sandbox.shell import Shells
@@ -254,6 +259,148 @@ class SDKContractTests(unittest.TestCase):
         self.assertNotIn("extra_config", _FakeClient.created[-1])
         self.assertTrue(sandbox._client.direct_enabled)
 
+    def test_acl_v2_allowlist_is_normalized_and_forwarded(self):
+        policy = NetworkPolicy.allowlist(
+            [
+                NetworkRule(
+                    cidr="10.20.30.40",
+                    protocol="tcp",
+                    port_range=22773,
+                    priority=110,
+                ),
+                NetworkRule(
+                    domain="BÜCHER.example.",
+                    protocol="tcp",
+                    port_range=PortRange(80, 443),
+                ),
+                NetworkRule(protocol="udp", port_range=53),
+            ]
+        )
+        with patch("yr_sandbox.sandbox_api.SandboxClient", _FakeClient):
+            Sandbox(
+                image="ubuntu:22.04",
+                network=policy,
+                detached=True,
+            )
+
+        self.assertEqual(
+            _FakeClient.created[-1]["network"],
+            {
+                "schemaVersion": 2,
+                "traffic": {
+                    "ingressDefaultAction": "allow",
+                    "egressDefaultAction": "deny",
+                    "mode": "stateful",
+                    "rules": [
+                        {
+                            "action": "allow",
+                            "direction": "egress",
+                            "protocol": "tcp",
+                            "priority": 110,
+                            "peer": {
+                                "cidr": "10.20.30.40/32",
+                                "portRange": {"first": 22773, "last": 22773},
+                            },
+                        },
+                        {
+                            "action": "allow",
+                            "direction": "egress",
+                            "protocol": "tcp",
+                            "priority": 100,
+                            "peer": {
+                                "domain": "xn--bcher-kva.example",
+                                "portRange": {"first": 80, "last": 443},
+                            },
+                        },
+                        {
+                            "action": "allow",
+                            "direction": "egress",
+                            "protocol": "udp",
+                            "priority": 100,
+                            "peer": {
+                                "portRange": {"first": 53, "last": 53}
+                            },
+                        },
+                    ],
+                },
+            },
+        )
+
+    def test_acl_v2_supports_independent_defaults_and_dns_policy(self):
+        policy = NetworkPolicy(
+            traffic=TrafficPolicy(
+                ingress_default_action="deny",
+                egress_default_action="allow",
+                mode="stateless",
+                rules=(
+                    NetworkRule(
+                        action="deny",
+                        direction="ingress",
+                        protocol="tcp",
+                        cidr="192.0.2.129/24",
+                        sandbox_port_range=PortRange(8000, 8010),
+                        priority=200,
+                    ),
+                ),
+            ),
+            dns=DNSPolicy(
+                default_action="deny",
+                rules=(DNSRule("*.example.com", action="allow"),),
+            ),
+        )
+
+        self.assertEqual(
+            policy.to_dict(),
+            {
+                "schemaVersion": 2,
+                "traffic": {
+                    "ingressDefaultAction": "deny",
+                    "egressDefaultAction": "allow",
+                    "mode": "stateless",
+                    "rules": [
+                        {
+                            "action": "deny",
+                            "direction": "ingress",
+                            "protocol": "tcp",
+                            "priority": 200,
+                            "peer": {"cidr": "192.0.2.0/24"},
+                            "sandboxPortRange": {
+                                "first": 8000,
+                                "last": 8010,
+                            },
+                        }
+                    ],
+                },
+                "dns": {
+                    "defaultAction": "deny",
+                    "rules": [
+                        {"action": "allow", "pattern": "*.example.com"}
+                    ],
+                },
+            },
+        )
+
+    def test_acl_v2_rejects_unsafe_or_unrepresentable_rules(self):
+        invalid_factories = [
+            lambda: PortRange(0),
+            lambda: PortRange(100, 99),
+            lambda: NetworkRule(cidr="2001:db8::/32"),
+            lambda: NetworkRule(cidr="10.0.0.0/8", domain="example.com"),
+            lambda: NetworkRule(domain="*.example.com", direction="both"),
+            lambda: NetworkRule(protocol="any", port_range=443),
+            lambda: NetworkRule(priority=(1 << 32) - 1),
+            lambda: TrafficPolicy(rules=(NetworkRule(),) * 257),
+            lambda: NetworkPolicy(
+                block_network=True,
+                traffic=TrafficPolicy(),
+            ),
+            lambda: NetworkPolicy.allowlist(()),
+        ]
+        for factory in invalid_factories:
+            with self.subTest(factory=factory):
+                with self.assertRaises((TypeError, ValueError)):
+                    factory()
+
     def test_network_policy_preserves_user_extra_config(self):
         with patch("yr_sandbox.sandbox_api.SandboxClient", _FakeClient):
             Sandbox(
@@ -290,6 +437,7 @@ class SDKContractTests(unittest.TestCase):
             lambda: NetworkPolicy.deny_dns(),
             lambda: NetworkPolicy.deny_dns("github.*"),
             lambda: NetworkPolicy.deny_dns("github..com"),
+            lambda: NetworkPolicy.deny_dns("github.com.."),
             lambda: NetworkPolicy(
                 block_network=True,
                 dns_blacklist=("github.com",),

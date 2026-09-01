@@ -474,6 +474,17 @@ class SandboxClient:
             body={},
         )
 
+    def update_network_policy(
+        self, sandbox_id: str, policy: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Atomically replace the complete network policy of one sandbox."""
+        return self._lifecycle_request(
+            sandbox_id,
+            operation="network",
+            body=policy,
+            method="put",
+        )
+
     def _lifecycle_request(
         self,
         sandbox_id: str,
@@ -481,12 +492,14 @@ class SandboxClient:
         operation: str,
         body: Dict[str, Any],
         timeout_seconds: int = YR_GET_DEFAULT_TIMEOUT,
+        method: str = "post",
     ) -> Dict[str, Any]:
         request_id = self._new_request_id(operation)
         last_error: Optional[BaseException] = None
+        sender = self._http.put if method == "put" else self._http.post
         for attempt in range(1, _LIFECYCLE_MAX_ATTEMPTS + 1):
             try:
-                resp = self._http.post(
+                resp = sender(
                     f"{self._base}/sandboxes/{sandbox_id}/{operation}",
                     json=body,
                     headers={"X-YR-Request-ID": request_id},
