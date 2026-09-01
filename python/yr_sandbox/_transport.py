@@ -66,6 +66,7 @@ _DIRECT_ROUTE_MISS_BUDGET = 3
 
 _CREATE_MAX_ATTEMPTS = 3
 _CREATE_RETRY_BACKOFF_SECONDS = 0.1
+_DEFAULT_CREATE_LOGICAL_TIMEOUT = 90
 _CREATE_RETRYABLE_ERRORS = (
     httpx.ConnectError,
     httpx.ConnectTimeout,
@@ -187,7 +188,9 @@ class SandboxClient:
 
     def create_info(self, body: Dict[str, Any]) -> Dict[str, Any]:
         """POST /sandboxes and return the confirmed-running final SSE result."""
-        logical_timeout = int(body.get("createTimeoutSeconds") or 60)
+        logical_timeout = int(
+            body.get("createTimeoutSeconds") or _DEFAULT_CREATE_LOGICAL_TIMEOUT
+        )
         request_timeout = logical_timeout + YR_GET_TIMEOUT_BUFFER
         # A UUIDv4 identifies this logical create across transport retries.
         # Anonymous names are intentionally left to the receiving frontend:

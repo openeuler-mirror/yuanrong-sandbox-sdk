@@ -32,8 +32,10 @@ from .types import (
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_CREATE_TIMEOUT = 60
-SCHEDULE_TIMEOUT_BUFFER = 30
+DEFAULT_SCHEDULE_TIMEOUT = 30
+_INIT_CALL_TIMEOUT = 30
+CREATE_TIMEOUT_BUFFER = 30
+_CREATE_TIMEOUT_RESERVE = _INIT_CALL_TIMEOUT + CREATE_TIMEOUT_BUFFER
 _AFFINITY_KIND_RESOURCE = 0
 _AFFINITY_REQUIRED = 2
 _LABEL_OPERATION_IN = 0
@@ -48,9 +50,7 @@ def _get_create_timeout(timeout: Optional[int]) -> int:
     if timeout is not None:
         value = timeout
     else:
-        raw = os.environ.get(
-            "YR_SANDBOX_CREATE_TIMEOUT", str(DEFAULT_CREATE_TIMEOUT)
-        ).strip()
+        raw = os.environ["YR_SANDBOX_CREATE_TIMEOUT"].strip()
         try:
             value = int(raw)
         except ValueError as exc:
@@ -72,20 +72,29 @@ def _resolve_create_timeouts(
     ):
         raise ValueError("schedule_timeout must be a positive integer")
 
-    resolved_create = _get_create_timeout(create_timeout)
-    if schedule_timeout is None:
-        schedule_timeout = 30
+    resolved_schedule = (
+        DEFAULT_SCHEDULE_TIMEOUT
+        if schedule_timeout is None
+        else schedule_timeout
+    )
+    if create_timeout is None and "YR_SANDBOX_CREATE_TIMEOUT" not in os.environ:
+        resolved_create = resolved_schedule + _CREATE_TIMEOUT_RESERVE
+    else:
+        resolved_create = _get_create_timeout(create_timeout)
 
-    if schedule_timeout > resolved_create:
+    if resolved_schedule > resolved_create:
         raise ValueError(
             "schedule_timeout must be less than or equal to create_timeout"
         )
-    if resolved_create - schedule_timeout < SCHEDULE_TIMEOUT_BUFFER:
+    remaining_create_budget = resolved_create - resolved_schedule
+    if remaining_create_budget < CREATE_TIMEOUT_BUFFER:
         raise ValueError(
             "create_timeout - schedule_timeout must be at least "
-            f"{SCHEDULE_TIMEOUT_BUFFER}"
+            f"{CREATE_TIMEOUT_BUFFER}"
         )
-    return resolved_create, schedule_timeout
+    if remaining_create_budget < _CREATE_TIMEOUT_RESERVE:
+        resolved_create = resolved_schedule + _CREATE_TIMEOUT_RESERVE
+    return resolved_create, resolved_schedule
 
 
 def _get_tunnel_connect_timeout(timeout: Optional[float]) -> float:
@@ -343,8 +352,12 @@ class Sandbox:
             cpu_limit: CPU cgroup limit in milli-cores (0 = same as *cpu*).
             mem_limit: Memory cgroup limit in MB (0 = same as *memory*).
             idle_timeout: Seconds before idle sandbox is reclaimed (default 300).
-            create_timeout: Logical create budget in seconds. Defaults to
-                ``YR_SANDBOX_CREATE_TIMEOUT`` or 60 seconds.
+            create_timeout: Logical create budget in seconds. By default it is
+                derived as ``schedule_timeout + 60``. An
+                ``YR_SANDBOX_CREATE_TIMEOUT`` value or a legacy explicit pair
+                that leaves the former 30-second response buffer remains
+                accepted; the SDK expands its effective create budget to also
+                cover runtime initialization.
             schedule_timeout: Scheduling budget in seconds (default 30).
             env: Environment variables to set in the sandbox.
             name: Logical name for the sandbox instance.
@@ -503,6 +516,7 @@ class Sandbox:
             "idleTimeoutSeconds": idle_timeout,
             "createTimeoutSeconds": resolved_create_timeout,
             "scheduleTimeoutSeconds": resolved_schedule_timeout,
+            "initCallTimeoutSeconds": _INIT_CALL_TIMEOUT,
             "rootfs": {"runtime": runtime},
         }
         if body["snapshotId"] is None:
