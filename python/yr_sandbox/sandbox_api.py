@@ -33,9 +33,9 @@ from .types import (
 logger = logging.getLogger(__name__)
 
 DEFAULT_SCHEDULE_TIMEOUT = 30
-INIT_CALL_TIMEOUT = 30
+_INIT_CALL_TIMEOUT = 30
 CREATE_TIMEOUT_BUFFER = 30
-CREATE_TIMEOUT_RESERVE = INIT_CALL_TIMEOUT + CREATE_TIMEOUT_BUFFER
+_CREATE_TIMEOUT_RESERVE = _INIT_CALL_TIMEOUT + CREATE_TIMEOUT_BUFFER
 _AFFINITY_KIND_RESOURCE = 0
 _AFFINITY_REQUIRED = 2
 _LABEL_OPERATION_IN = 0
@@ -78,7 +78,7 @@ def _resolve_create_timeouts(
         else schedule_timeout
     )
     if create_timeout is None and "YR_SANDBOX_CREATE_TIMEOUT" not in os.environ:
-        resolved_create = resolved_schedule + CREATE_TIMEOUT_RESERVE
+        resolved_create = resolved_schedule + _CREATE_TIMEOUT_RESERVE
     else:
         resolved_create = _get_create_timeout(create_timeout)
 
@@ -92,8 +92,8 @@ def _resolve_create_timeouts(
             "create_timeout - schedule_timeout must be at least "
             f"{CREATE_TIMEOUT_BUFFER}"
         )
-    if remaining_create_budget < CREATE_TIMEOUT_RESERVE:
-        resolved_create = resolved_schedule + CREATE_TIMEOUT_RESERVE
+    if remaining_create_budget < _CREATE_TIMEOUT_RESERVE:
+        resolved_create = resolved_schedule + _CREATE_TIMEOUT_RESERVE
     return resolved_create, resolved_schedule
 
 
@@ -516,6 +516,7 @@ class Sandbox:
             "idleTimeoutSeconds": idle_timeout,
             "createTimeoutSeconds": resolved_create_timeout,
             "scheduleTimeoutSeconds": resolved_schedule_timeout,
+            "initCallTimeoutSeconds": _INIT_CALL_TIMEOUT,
             "rootfs": {"runtime": runtime},
         }
         if body["snapshotId"] is None:

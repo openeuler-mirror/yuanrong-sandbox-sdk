@@ -557,6 +557,7 @@ def test_sandbox_create_timeout_precedence_and_body():
 
     _check(seen[0]["createTimeoutSeconds"] == 400, f"explicit timeout body: {seen[0]}")
     _check(seen[0]["scheduleTimeoutSeconds"] == 30, f"default schedule timeout body: {seen[0]}")
+    _check(seen[0]["initCallTimeoutSeconds"] == 30, f"init timeout body: {seen[0]}")
     _check(seen[0]["rootfs"]["runtime"] == "kata", f"runtime body: {seen[0]}")
     _check("runtime" not in seen[0], f"top-level runtime body: {seen[0]}")
     _check(seen[1]["createTimeoutSeconds"] == 500, f"env create timeout body: {seen[1]}")
