@@ -114,12 +114,47 @@ class LifecycleTests(unittest.TestCase):
         self.assertTrue(callable(resume), "Sandbox.resume must exist")
         self.assertEqual(
             list(inspect.signature(pause).parameters),
-            ["self", "ttl_seconds"],
+            ["self", "ttl_seconds", "timeout_seconds"],
         )
         self.assertEqual(
             list(inspect.signature(resume).parameters),
             ["self"],
         )
+
+    def test_reload_returns_bool_without_replacing_facades(self):
+        class Client(_CloseTracker):
+            def reload(self, sandbox_id):
+                self.reload_arg = sandbox_id
+                return {"success": True}
+
+        sandbox = object.__new__(Sandbox)
+        sandbox._client = Client()
+        sandbox._sid = "default-sandbox-1"
+        sandbox._closed = False
+        sandbox._commands = object()
+        sandbox._files = object()
+        sandbox._shells = object()
+        before = (sandbox._client, sandbox._commands, sandbox._files, sandbox._shells)
+
+        self.assertIs(sandbox.reload(), True)
+        self.assertEqual(sandbox._client.reload_arg, "default-sandbox-1")
+        self.assertEqual(
+            (sandbox._client, sandbox._commands, sandbox._files, sandbox._shells),
+            before,
+        )
+
+    def test_reload_returns_false_when_closed_or_transport_fails(self):
+        class Client(_CloseTracker):
+            def reload(self, _sandbox_id):
+                raise yr_sandbox.SandboxError("reload failed")
+
+        sandbox = object.__new__(Sandbox)
+        sandbox._client = Client()
+        sandbox._sid = "default-sandbox-1"
+        sandbox._closed = True
+        self.assertIs(sandbox.reload(), False)
+        sandbox._closed = False
+        self.assertIs(sandbox.reload(), False)
 
     def test_pause_and_resume_return_typed_authoritative_results(self):
         pause_result_type = getattr(yr_sandbox, "PauseResult", None)
@@ -128,8 +163,8 @@ class LifecycleTests(unittest.TestCase):
         self.assertIsNotNone(resume_result_type, "ResumeResult must be public")
 
         class Client(_CloseTracker):
-            def pause(self, sandbox_id, ttl_seconds):
-                self.pause_args = (sandbox_id, ttl_seconds)
+            def pause(self, sandbox_id, ttl_seconds, timeout_seconds=300):
+                self.pause_args = (sandbox_id, ttl_seconds, timeout_seconds)
                 return {
                     "sandboxId": sandbox_id,
                     "snapshotId": "pause-123",
@@ -167,7 +202,10 @@ class LifecycleTests(unittest.TestCase):
                 expires_at=1_800_000_000,
             ),
         )
-        self.assertEqual(sandbox._client.pause_args, ("default-sandbox-1", 90_000))
+        self.assertEqual(
+            sandbox._client.pause_args,
+            ("default-sandbox-1", 90_000, 300),
+        )
         self.assertEqual(
             resume_result,
             resume_result_type(

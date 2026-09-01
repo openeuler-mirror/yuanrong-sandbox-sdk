@@ -931,6 +931,52 @@ class TunnelClientTlsTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("handshake rejected", output)
         self.assertIn("HTTP 403", output)
 
+    async def test_checkpoint_inflight_reconnect_is_quiet_and_nonfatal(self):
+        client = TunnelClient(upstream="127.0.0.1:1")
+        attempts = 0
+        from websockets.datastructures import Headers
+        from websockets.http11 import Response
+
+        error = tunnel_client.ws_exc.InvalidStatus(
+            Response(503, "Rejected", Headers(), b"")
+        )
+
+        class _RepeatedRejection:
+            async def __aenter__(self):
+                nonlocal attempts
+                attempts += 1
+                if attempts == 3:
+                    client._stopping.set()
+                raise error
+
+            async def __aexit__(self, *_args):
+                return False
+
+        with (
+            mock.patch.object(
+                tunnel_client.ws_client,
+                "connect",
+                side_effect=lambda *_args, **_kwargs: _RepeatedRejection(),
+            ),
+            mock.patch.object(
+                tunnel_client.asyncio,
+                "sleep",
+                new=mock.AsyncMock(),
+            ),
+            self.assertLogs(tunnel_client.logger, level="DEBUG") as logs,
+            client.checkpoint_inflight(),
+        ):
+            await client._connect_loop("ws://router.test/tunnel/sandbox")
+
+        reconnect_logs = [
+            record
+            for record in logs.records
+            if "handshake rejected" in record.getMessage()
+        ]
+        self.assertEqual(attempts, 3)
+        self.assertTrue(reconnect_logs)
+        self.assertTrue(all(record.levelno < logging.WARNING for record in reconnect_logs))
+
     async def test_wss_uses_default_certificate_and_hostname_verification(self):
         client = TunnelClient(upstream="127.0.0.1:1")
         captured = {}
