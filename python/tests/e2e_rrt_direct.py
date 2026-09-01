@@ -57,7 +57,7 @@ print(f"frontend={server} direct=/direct")
 sb = Sandbox(
     name="rrt-direct-e2e",
     memory=memory,
-    create_timeout=180,
+    create_timeout=455,
     schedule_timeout=120,
 )
 client = sb._client

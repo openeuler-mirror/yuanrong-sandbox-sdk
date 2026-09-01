@@ -531,10 +531,23 @@ def test_sandbox_create_timeout_precedence_and_body():
             schedule_timeout=45,
             detached=True,
         )
+        legacy = sandbox_api.Sandbox(
+            image="python:3.12-slim",
+            create_timeout=180,
+            schedule_timeout=120,
+            detached=True,
+        )
+        os.environ["YR_SANDBOX_CREATE_TIMEOUT"] = "60"
+        legacy_env = sandbox_api.Sandbox(
+            image="python:3.12-slim",
+            detached=True,
+        )
         explicit.kill()
         schedule_only.kill()
         inherited.kill()
         derived.kill()
+        legacy.kill()
+        legacy_env.kill()
     finally:
         sandbox_api.SandboxClient = original_client
         if original_env is None:
@@ -554,6 +567,10 @@ def test_sandbox_create_timeout_precedence_and_body():
     _check("runtime" not in seen[2], f"top-level runtime body: {seen[2]}")
     _check(seen[3]["createTimeoutSeconds"] == 380, f"derived create timeout body: {seen[3]}")
     _check(seen[3]["scheduleTimeoutSeconds"] == 45, f"derived schedule timeout body: {seen[3]}")
+    _check(seen[4]["createTimeoutSeconds"] == 455, f"legacy create timeout body: {seen[4]}")
+    _check(seen[4]["scheduleTimeoutSeconds"] == 120, f"legacy schedule timeout body: {seen[4]}")
+    _check(seen[5]["createTimeoutSeconds"] == 365, f"legacy env timeout body: {seen[5]}")
+    _check(seen[5]["scheduleTimeoutSeconds"] == 30, f"legacy env schedule body: {seen[5]}")
     print("ok: Sandbox create timeout precedence and body")
 
 
@@ -562,8 +579,8 @@ def test_sandbox_create_timeout_validation():
 
     invalid = (
         (
-            {"create_timeout": 335},
-            "create_timeout - schedule_timeout must be at least 335",
+            {"create_timeout": 60, "schedule_timeout": 40},
+            "create_timeout - schedule_timeout must be at least 30",
         ),
         ({"schedule_timeout": -1}, "schedule_timeout must be a positive integer"),
         ({"schedule_timeout": 0}, "schedule_timeout must be a positive integer"),
@@ -572,8 +589,8 @@ def test_sandbox_create_timeout_validation():
             "schedule_timeout must be less than or equal to create_timeout",
         ),
         (
-            {"create_timeout": 400, "schedule_timeout": 80},
-            "create_timeout - schedule_timeout must be at least 335",
+            {"create_timeout": 100, "schedule_timeout": 80},
+            "create_timeout - schedule_timeout must be at least 30",
         ),
     )
     for kwargs, message in invalid:
