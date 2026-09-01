@@ -87,11 +87,12 @@ Frontend owns internal RRT port environment injection (`RRT_HTTP_PORT`,
 `RRT_TUNNEL_WS_PORT`, `RRT_TUNNEL_HTTP_PORT`); SDK callers should request
 features declaratively instead of setting those ports.
 
-Create and schedule timeouts use seconds. Callers normally set only one:
-`scheduleTimeoutSeconds = createTimeoutSeconds - 30`, or
-`createTimeoutSeconds = scheduleTimeoutSeconds + 30`. If both are sent, the
-schedule timeout must not exceed the create timeout and the difference must be
-at least 30 seconds.
+Create and schedule timeouts use seconds. The create timeout covers scheduling,
+the 305-second runtime initialization budget, and a 30-second frontend response
+buffer. Callers normally set only one: `scheduleTimeoutSeconds =
+createTimeoutSeconds - 335`, or `createTimeoutSeconds =
+scheduleTimeoutSeconds + 335`. If both are sent, their difference must be at
+least 335 seconds.
 
 ### Direct data plane
 

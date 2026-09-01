@@ -32,8 +32,11 @@ from .types import (
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_CREATE_TIMEOUT = 60
-SCHEDULE_TIMEOUT_BUFFER = 30
+DEFAULT_SCHEDULE_TIMEOUT = 30
+INIT_CALL_TIMEOUT = 305
+CREATE_TIMEOUT_BUFFER = 30
+CREATE_TIMEOUT_RESERVE = INIT_CALL_TIMEOUT + CREATE_TIMEOUT_BUFFER
+DEFAULT_CREATE_TIMEOUT = DEFAULT_SCHEDULE_TIMEOUT + CREATE_TIMEOUT_RESERVE
 _AFFINITY_KIND_RESOURCE = 0
 _AFFINITY_REQUIRED = 2
 _LABEL_OPERATION_IN = 0
@@ -72,18 +75,21 @@ def _resolve_create_timeouts(
     ):
         raise ValueError("schedule_timeout must be a positive integer")
 
-    resolved_create = _get_create_timeout(create_timeout)
     if schedule_timeout is None:
-        schedule_timeout = 30
+        schedule_timeout = DEFAULT_SCHEDULE_TIMEOUT
+    if create_timeout is None and "YR_SANDBOX_CREATE_TIMEOUT" not in os.environ:
+        resolved_create = schedule_timeout + CREATE_TIMEOUT_RESERVE
+    else:
+        resolved_create = _get_create_timeout(create_timeout)
 
     if schedule_timeout > resolved_create:
         raise ValueError(
             "schedule_timeout must be less than or equal to create_timeout"
         )
-    if resolved_create - schedule_timeout < SCHEDULE_TIMEOUT_BUFFER:
+    if resolved_create - schedule_timeout < CREATE_TIMEOUT_RESERVE:
         raise ValueError(
             "create_timeout - schedule_timeout must be at least "
-            f"{SCHEDULE_TIMEOUT_BUFFER}"
+            f"{CREATE_TIMEOUT_RESERVE}"
         )
     return resolved_create, schedule_timeout
 
@@ -344,7 +350,9 @@ class Sandbox:
             mem_limit: Memory cgroup limit in MB (0 = same as *memory*).
             idle_timeout: Seconds before idle sandbox is reclaimed (default 300).
             create_timeout: Logical create budget in seconds. Defaults to
-                ``YR_SANDBOX_CREATE_TIMEOUT`` or 60 seconds.
+                ``YR_SANDBOX_CREATE_TIMEOUT`` or 365 seconds. It must cover
+                scheduling, runtime initialization, and the frontend response
+                buffer.
             schedule_timeout: Scheduling budget in seconds (default 30).
             env: Environment variables to set in the sandbox.
             name: Logical name for the sandbox instance.

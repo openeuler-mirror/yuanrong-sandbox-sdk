@@ -512,10 +512,10 @@ def test_sandbox_create_timeout_precedence_and_body():
 
     try:
         sandbox_api.SandboxClient = FakeClient
-        os.environ["YR_SANDBOX_CREATE_TIMEOUT"] = "90"
+        os.environ["YR_SANDBOX_CREATE_TIMEOUT"] = "500"
         explicit = sandbox_api.Sandbox(
             image="python:3.12-slim",
-            create_timeout=70,
+            create_timeout=400,
             runtime="kata",
             detached=True,
         )
@@ -525,9 +525,16 @@ def test_sandbox_create_timeout_precedence_and_body():
             detached=True,
         )
         inherited = sandbox_api.Sandbox(image="python:3.12-slim", detached=True)
+        os.environ.pop("YR_SANDBOX_CREATE_TIMEOUT", None)
+        derived = sandbox_api.Sandbox(
+            image="python:3.12-slim",
+            schedule_timeout=45,
+            detached=True,
+        )
         explicit.kill()
         schedule_only.kill()
         inherited.kill()
+        derived.kill()
     finally:
         sandbox_api.SandboxClient = original_client
         if original_env is None:
@@ -535,16 +542,18 @@ def test_sandbox_create_timeout_precedence_and_body():
         else:
             os.environ["YR_SANDBOX_CREATE_TIMEOUT"] = original_env
 
-    _check(seen[0]["createTimeoutSeconds"] == 70, f"explicit timeout body: {seen[0]}")
+    _check(seen[0]["createTimeoutSeconds"] == 400, f"explicit timeout body: {seen[0]}")
     _check(seen[0]["scheduleTimeoutSeconds"] == 30, f"default schedule timeout body: {seen[0]}")
     _check(seen[0]["rootfs"]["runtime"] == "kata", f"runtime body: {seen[0]}")
     _check("runtime" not in seen[0], f"top-level runtime body: {seen[0]}")
-    _check(seen[1]["createTimeoutSeconds"] == 90, f"env create timeout body: {seen[1]}")
+    _check(seen[1]["createTimeoutSeconds"] == 500, f"env create timeout body: {seen[1]}")
     _check(seen[1]["scheduleTimeoutSeconds"] == 45, f"explicit schedule timeout body: {seen[1]}")
-    _check(seen[2]["createTimeoutSeconds"] == 90, f"env timeout body: {seen[2]}")
+    _check(seen[2]["createTimeoutSeconds"] == 500, f"env timeout body: {seen[2]}")
     _check(seen[2]["scheduleTimeoutSeconds"] == 30, f"default schedule timeout body: {seen[2]}")
     _check(seen[2]["rootfs"]["runtime"] == "runsc", f"default isolation runtime body: {seen[2]}")
     _check("runtime" not in seen[2], f"top-level runtime body: {seen[2]}")
+    _check(seen[3]["createTimeoutSeconds"] == 380, f"derived create timeout body: {seen[3]}")
+    _check(seen[3]["scheduleTimeoutSeconds"] == 45, f"derived schedule timeout body: {seen[3]}")
     print("ok: Sandbox create timeout precedence and body")
 
 
@@ -553,18 +562,18 @@ def test_sandbox_create_timeout_validation():
 
     invalid = (
         (
-            {"create_timeout": 30},
-            "create_timeout - schedule_timeout must be at least 30",
+            {"create_timeout": 335},
+            "create_timeout - schedule_timeout must be at least 335",
         ),
         ({"schedule_timeout": -1}, "schedule_timeout must be a positive integer"),
         ({"schedule_timeout": 0}, "schedule_timeout must be a positive integer"),
         (
-            {"create_timeout": 60, "schedule_timeout": 70},
+            {"create_timeout": 400, "schedule_timeout": 410},
             "schedule_timeout must be less than or equal to create_timeout",
         ),
         (
-            {"create_timeout": 60, "schedule_timeout": 45},
-            "create_timeout - schedule_timeout must be at least 30",
+            {"create_timeout": 400, "schedule_timeout": 80},
+            "create_timeout - schedule_timeout must be at least 335",
         ),
     )
     for kwargs, message in invalid:
