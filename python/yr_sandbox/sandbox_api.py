@@ -7,6 +7,7 @@ and reverse tunnel helpers are exposed as Python objects on ``Sandbox``.
 
 import logging
 import os
+import random
 import re
 from collections.abc import Mapping
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -18,16 +19,16 @@ from .filesystem import Filesystem
 from .pty import Pty
 from .shell import Shells
 from .types import (
+    YR_GET_DEFAULT_TIMEOUT,
     ConnectionConfig,
     Mount,
     NetworkPolicy,
     PauseResult,
     PortForwarding,
+    ResumeResult,
     S3Config,
     SandboxInfo,
     SnapshotInfo,
-    ResumeResult,
-    YR_GET_DEFAULT_TIMEOUT,
 )
 
 logger = logging.getLogger(__name__)
@@ -44,6 +45,7 @@ _SUPPORTED_XPU_TYPES = frozenset({"gpu"})
 _SNAPSHOT_RESOURCE_FIELDS = frozenset(
     {"cpu", "memory", "cpu_limit", "mem_limit"}
 )
+_ENTRYPOINT_POLL_INTERVAL = 10.0
 
 
 def _get_create_timeout(timeout: Optional[int]) -> int:
@@ -331,6 +333,7 @@ class Sandbox:
         *,
         snapshot_id: Optional[str] = None,
         failover: bool = False,
+        inherit_entrypoint: bool = False,
         xpu: Optional[str] = None,
         storage_mb: Optional[int] = None,
         storage_limit_mb: int = 0,
@@ -382,6 +385,9 @@ class Sandbox:
                 omitted).
             failover: Restore this sandbox on the same node from its latest
                 local anonymous checkpoint after a sandbox failure.
+            inherit_entrypoint: Start the effective ``Entrypoint`` and ``Cmd``
+                configured by an image and manage it as the sandbox workload.
+                This option is valid only for image-backed fresh creates.
             network: Optional creation-time network policy. Omitting it allows
                 unrestricted network access.
             connection: Explicit frontend and gateway connection settings.
@@ -402,6 +408,12 @@ class Sandbox:
             raise ValueError("snapshot_id must be a non-empty string")
         if not isinstance(failover, bool):
             raise TypeError("failover must be a boolean")
+        if not isinstance(inherit_entrypoint, bool):
+            raise TypeError("inherit_entrypoint must be a boolean")
+        if inherit_entrypoint and image is None:
+            raise ValueError("inherit_entrypoint requires an image rootfs")
+        if inherit_entrypoint and snapshot_id is not None:
+            raise ValueError("inherit_entrypoint cannot be combined with snapshot_id")
         if env is not None and (
             not isinstance(env, Mapping)
             or not all(
@@ -521,6 +533,8 @@ class Sandbox:
         }
         if body["snapshotId"] is None:
             del body["snapshotId"]
+        if inherit_entrypoint:
+            body["inheritEntrypoint"] = True
         if image:
             body["rootfs"].update(
                 {
@@ -592,6 +606,8 @@ class Sandbox:
         self._cpu = cpu
         self._memory = memory
         self._cwd = cwd
+        self._inherit_entrypoint = inherit_entrypoint
+        self._entrypoint_exit_info: Optional[Dict[str, Any]] = None
 
         # ── ports: user port_forwardings only ─────────────────────────────
         # Frontend owns RRT_HTTP_PORT=50090 and its sandbox network mapping for
@@ -781,6 +797,51 @@ class Sandbox:
             return create_info(body)
         sid = self._client.create(body)
         return getattr(self._client, "last_create", None) or {"sandboxId": sid}
+
+    def wait_entrypoint(self) -> int:
+        """Wait for the inherited image startup process to exit.
+
+        Each request is a bounded long poll so frontend and gateway request
+        deadlines are never used as an unbounded wait. Signal exits use the
+        conventional ``128 + signal`` code. Full terminal details remain
+        available through :attr:`entrypoint_exit_info`.
+        """
+        if not self._inherit_entrypoint:
+            raise RuntimeError("inherit_entrypoint was not enabled for this sandbox")
+        if self._closed:
+            raise RuntimeError("sandbox is closed")
+
+        while True:
+            poll_wait = _ENTRYPOINT_POLL_INTERVAL * (0.7 + random.random() * 0.6)
+            result = self._client.invoke(
+                self._sid,
+                "entrypoint.poll",
+                {"wait_timeout": poll_wait},
+                timeout=max(1, int(poll_wait + 1)),
+            )
+            status = result.get("status")
+            if status == "running":
+                continue
+            if status == "exited":
+                self._entrypoint_exit_info = dict(result)
+                exit_code = result.get("shell_exit_code", result.get("exit_code"))
+                if isinstance(exit_code, bool) or not isinstance(exit_code, int):
+                    raise SandboxError(
+                        f"entrypoint exit response missing exit code: {result}"
+                    )
+                return exit_code
+            if status == "error":
+                raise SandboxError(
+                    str(result.get("message") or "entrypoint polling failed")
+                )
+            raise SandboxError(f"invalid entrypoint poll response: {result}")
+
+    @property
+    def entrypoint_exit_info(self) -> Optional[Dict[str, Any]]:
+        """Structured terminal status cached by :meth:`wait_entrypoint`."""
+        if self._entrypoint_exit_info is None:
+            return None
+        return dict(self._entrypoint_exit_info)
 
     # ── lifecycle ──────────────────────────────────────────────────────
 
