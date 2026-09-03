@@ -53,6 +53,14 @@ class _FakeClient:
             return {}
         if action == "shell.poll":
             return {"status": "done", "stdout": "", "stderr": "", "exit_code": 0}
+        if action == "entrypoint.poll":
+            return {
+                "status": "exited",
+                "exit_code": None,
+                "signal": 9,
+                "shell_exit_code": 137,
+                "message": "entrypoint exited after signal SIGKILL",
+            }
         raise AssertionError(action)
 
     def instance_info(self, sandbox_id):
@@ -128,6 +136,37 @@ class SDKContractTests(unittest.TestCase):
             sandbox._client.calls[-1][2]["cwd"],
             "/workspace",
         )
+
+    def test_inherit_entrypoint_is_image_only_and_serialized_when_enabled(self):
+        with patch("yr_sandbox.sandbox_api.SandboxClient", _FakeClient):
+            sandbox = Sandbox(
+                image="example/image:latest",
+                inherit_entrypoint=True,
+                detached=True,
+            )
+
+        self.assertTrue(_FakeClient.created[-1]["inheritEntrypoint"])
+        self.assertEqual(sandbox.wait_entrypoint(), 137)
+        self.assertEqual(sandbox.entrypoint_exit_info["signal"], 9)
+        self.assertEqual(sandbox._client.calls[-1][1], "entrypoint.poll")
+
+    def test_inherit_entrypoint_false_is_omitted_and_invalid_combinations_fail(self):
+        with patch("yr_sandbox.sandbox_api.SandboxClient", _FakeClient):
+            Sandbox(image="ubuntu:22.04", detached=True)
+            self.assertNotIn("inheritEntrypoint", _FakeClient.created[-1])
+            with self.assertRaisesRegex(TypeError, "inherit_entrypoint"):
+                Sandbox(image="ubuntu:22.04", inherit_entrypoint=1)
+            with self.assertRaisesRegex(ValueError, "image rootfs"):
+                Sandbox(
+                    rootfs=S3Config("endpoint", "bucket", "object"),
+                    inherit_entrypoint=True,
+                )
+            with self.assertRaisesRegex(ValueError, "snapshot_id"):
+                Sandbox(
+                    image="ubuntu:22.04",
+                    snapshot_id="snapshot-1",
+                    inherit_entrypoint=True,
+                )
 
     def test_explicit_connection_config_is_shared_without_environment_state(self):
         connection = ConnectionConfig(

@@ -16,6 +16,22 @@ with Sandbox(image="python:3.12-slim", cpu=2000, memory=4096) as sandbox:
 `close()` releases local SDK resources and leaves the remote sandbox alive.
 `kill()` deletes a non-detached remote sandbox as well.
 
+## Image startup process
+
+Set `inherit_entrypoint=True` on a fresh image-backed sandbox to start the
+image's effective `Entrypoint` and `Cmd` as its managed workload:
+
+```python
+sandbox = Sandbox(image="example/worker:latest", inherit_entrypoint=True)
+exit_code = sandbox.wait_entrypoint()
+print(exit_code, sandbox.entrypoint_exit_info)
+```
+
+Creation fails when the image has no effective startup command or when that
+process exits before sandbox initialization completes. After a successful
+create, its terminal status remains available through bounded polling while
+the sandbox and its other APIs remain usable.
+
 ## Lifecycle overview
 
 There are three deliberately different checkpoint paths:
